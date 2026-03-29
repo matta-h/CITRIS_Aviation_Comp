@@ -1,0 +1,1 @@
+print("CITRIS Aviation simulation starting...")
