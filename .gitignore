@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# JetBrains
+.idea/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+
+# Build / cache
+build/
+dist/
+.cache/
+
+# Data outputs you may not want tracked
+outputs/
+results/
+exports/
+
+# Large GIS / sim artifacts
+*.tif
+*.tiff
+*.geojson.bak
+*.shp.xml
+
+# Optional: ignore local data dumps
+data/raw/
