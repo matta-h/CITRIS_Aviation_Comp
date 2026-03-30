@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import requests
 import math
 import heapq
+from backend.weather import fetch_weather_for_nodes, weather_penalty
 from typing import Dict, List, Optional, Tuple
 
 # -------------------------------------------------
@@ -265,6 +267,54 @@ def distance_between(node_a: dict, node_b: dict) -> float:
     return haversine_miles(node_a["lat"], node_a["lon"], node_b["lat"], node_b["lon"])
 
 # -------------------------------------------------
+# Detour routing
+# -------------------------------------------------
+def generate_detour_nodes(a: dict, b: dict, zone: dict):
+    """
+    Create 2 detour point pairs around a circular obstacle.
+    Uses local-mile coordinates, then converts back to lat/lon.
+    """
+
+    ref_lat = (a["lat"] + b["lat"] + zone["lat"]) / 3.0
+
+    ax, ay = to_local_miles(a["lat"], a["lon"], ref_lat)
+    bx, by = to_local_miles(b["lat"], b["lon"], ref_lat)
+    cx, cy = to_local_miles(zone["lat"], zone["lon"], ref_lat)
+
+    r = zone["radius_miles"]
+    offset = 0.45  # radians
+    detours = []
+
+    angle_a = math.atan2(ay - cy, ax - cx)
+    angle_b = math.atan2(by - cy, bx - cx)
+
+    miles_per_deg_lat = 69.0
+    miles_per_deg_lon = 69.0 * math.cos(math.radians(ref_lat))
+
+    def local_to_latlon(x: float, y: float) -> dict:
+        return {
+            "lat": y / miles_per_deg_lat,
+            "lon": x / miles_per_deg_lon,
+        }
+
+    for direction in [1, -1]:
+        theta1 = angle_a + direction * offset
+        theta2 = angle_b - direction * offset
+
+        p1x = cx + (r * 1.2) * math.cos(theta1)
+        p1y = cy + (r * 1.2) * math.sin(theta1)
+
+        p2x = cx + (r * 1.2) * math.cos(theta2)
+        p2y = cy + (r * 1.2) * math.sin(theta2)
+
+        p1 = local_to_latlon(p1x, p1y)
+        p2 = local_to_latlon(p2x, p2y)
+
+        detours.append((p1, p2))
+
+    return detours
+
+# -------------------------------------------------
 # Graph construction
 # -------------------------------------------------
 def classify_edge(a: str, b: str, dist: float) -> str:
@@ -283,6 +333,8 @@ def classify_edge(a: str, b: str, dist: float) -> str:
 def build_graph() -> Dict[str, List[dict]]:
     graph: Dict[str, List[dict]] = {node_id: [] for node_id in NODES}
 
+    weather_data = fetch_weather_for_nodes(NODES)
+
     node_ids = list(NODES.keys())
     for i in range(len(node_ids)):
         for j in range(i + 1, len(node_ids)):
@@ -291,25 +343,74 @@ def build_graph() -> Dict[str, List[dict]]:
 
             dist = distance_between(NODES[a], NODES[b])
 
-            # Hard range rule
             if dist > MAX_LEG_MILES:
                 continue
 
-            # Temporary distance-based route class
             rclass = classify_edge(a, b, dist)
-
-            # Hard no-fly rejection
             hit_zone = no_fly_hit(NODES[a], NODES[b])
+
             if hit_zone is not None:
+                detour_paths = generate_detour_nodes(NODES[a], NODES[b], hit_zone)
+
+                for p1, p2 in detour_paths:
+                    d1 = distance_between(NODES[a], p1)
+                    d2 = distance_between(p1, p2)
+                    d3 = distance_between(p2, NODES[b])
+
+                    total_dist = d1 + d2 + d3
+
+                    if total_dist > MAX_LEG_MILES * 1.5:
+                        continue
+
+                    wx_a = weather_data.get(a, {})
+                    wx_b = weather_data.get(b, {})
+
+                    penalty_a = weather_penalty(wx_a)
+                    penalty_b = weather_penalty(wx_b)
+
+                    if penalty_a == float("inf") or penalty_b == float("inf"):
+                        continue
+
+                    weather_cost = penalty_a + penalty_b
+                    cost = total_dist * 1.3 + weather_cost
+
+                    graph[a].append({
+                        "to": b,
+                        "distance_miles": total_dist,
+                        "route_class": "detour",
+                        "cost": cost,
+                        "via": [p1, p2],
+                    })
+
+                    graph[b].append({
+                        "to": a,
+                        "distance_miles": total_dist,
+                        "route_class": "detour",
+                        "cost": cost,
+                        "via": [p2, p1],
+                    })
+
                 continue
 
             short_hop_penalty = SHORT_HOP_PENALTY if dist < SHORT_HOP_THRESHOLD else 0.0
             obstacle_penalty = slow_zone_penalty(NODES[a], NODES[b])
 
+            wx_a = weather_data.get(a, {})
+            wx_b = weather_data.get(b, {})
+
+            penalty_a = weather_penalty(wx_a)
+            penalty_b = weather_penalty(wx_b)
+
+            if penalty_a == float("inf") or penalty_b == float("inf"):
+                continue
+
+            weather_cost = penalty_a + penalty_b
+
             cost = (
                 dist * RISK_WEIGHTS[rclass]
                 + short_hop_penalty
                 + obstacle_penalty
+                + weather_cost
             )
 
             graph[a].append({
@@ -327,13 +428,13 @@ def build_graph() -> Dict[str, List[dict]]:
 
     return graph
 
-GRAPH = build_graph()
-
 # -------------------------------------------------
 # Shortest path
 # -------------------------------------------------
 def shortest_path(start: str, end: str) -> Optional[dict]:
-    if start not in GRAPH or end not in GRAPH:
+    graph = build_graph()
+
+    if start not in graph or end not in graph:
         return None
 
     pq: List[Tuple[float, str, List[str]]] = [(0.0, start, [])]
@@ -355,13 +456,19 @@ def shortest_path(start: str, end: str) -> Optional[dict]:
             for i in range(len(path) - 1):
                 a = path[i]
                 b = path[i + 1]
-                edge = next(e for e in GRAPH[a] if e["to"] == b)
-                legs.append({
+                edge = next(e for e in graph[a] if e["to"] == b)
+
+                leg = {
                     "from": a,
                     "to": b,
                     "distance_miles": round(edge["distance_miles"], 2),
                     "route_class": edge["route_class"],
-                })
+                }
+
+                if "via" in edge:
+                    leg["via"] = edge["via"]
+
+                legs.append(leg)
                 total_distance += edge["distance_miles"]
 
             return {
@@ -372,12 +479,10 @@ def shortest_path(start: str, end: str) -> Optional[dict]:
                 "num_legs": len(path) - 1,
             }
 
-        for edge in GRAPH[current]:
+        for edge in graph[current]:
             neighbor = edge["to"]
-
             extra_cost = edge["cost"]
 
-            # Penalize intermediate stops
             if current != start:
                 extra_cost += STOP_PENALTY
 
@@ -386,12 +491,12 @@ def shortest_path(start: str, end: str) -> Optional[dict]:
     return None
 
 if __name__ == "__main__":
+    graph = build_graph()
     print("Feasible graph:")
     print(f"MAX_LEG_MILES = {MAX_LEG_MILES}")
-    print(f"MIN_LEG_MILES = {MIN_LEG_MILES}")
     print(f"STOP_PENALTY = {STOP_PENALTY}")
 
-    for node_id, edges in GRAPH.items():
+    for node_id, edges in graph.items():
         print(f"\n{node_id}:")
         for e in edges:
             print(
@@ -403,9 +508,3 @@ if __name__ == "__main__":
 
     print("\nExample route UCB -> UCD")
     print(shortest_path("UCB", "UCD"))
-
-    print("\nExample route UCD -> UCM")
-    print(shortest_path("UCD", "UCM"))
-
-    print("\nExample route UCB -> KSNS")
-    print(shortest_path("UCB", "KSNS"))

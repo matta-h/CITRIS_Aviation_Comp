@@ -20,7 +20,20 @@ function routeColor(routeClass) {
   if (routeClass === "green") return "green";
   if (routeClass === "yellow") return "gold";
   if (routeClass === "orange") return "orange";
+  if (routeClass === "detour") return "deepskyblue";
   return "red";
+}
+
+function weatherColor(status) {
+  if (status === "good") return "green";
+  if (status === "caution") return "gold";
+  if (status === "unsafe") return "red";
+  return "gray";
+}
+
+function formatVisibilityMiles(meters) {
+  if (meters == null) return "N/A";
+  return (meters / 1609.34).toFixed(1);
 }
 
 function App() {
@@ -29,6 +42,7 @@ function App() {
   const [selectedEnd, setSelectedEnd] = useState(null);
   const [routeData, setRouteData] = useState(null);
   const [error, setError] = useState("");
+  const [weather, setWeather] = useState({});
   const [obstacles, setObstacles] = useState({
     no_fly_zones: [],
     slow_zones: [],
@@ -49,6 +63,16 @@ function App() {
           no_fly_zones: [],
           slow_zones: [],
         });
+      });
+
+    fetch("http://127.0.0.1:8000/weather")
+      .then((res) => res.json())
+      .then((data) => {
+        setWeather(data ?? {});
+      })
+      .catch(() => {
+        console.warn("Failed to load weather.");
+        setWeather({});
       });
 
     fetch("http://127.0.0.1:8000/nodes")
@@ -107,15 +131,25 @@ function App() {
         const toNode = nodeMap[leg.to];
         if (!fromNode || !toNode) return null;
 
+        const positions = [[fromNode.lat, fromNode.lon]];
+
+        if (Array.isArray(leg.via)) {
+          leg.via.forEach((p) => {
+            if (p?.lat != null && p?.lon != null) {
+              positions.push([p.lat, p.lon]);
+            }
+          });
+        }
+
+        positions.push([toNode.lat, toNode.lon]);
+
         return {
-          positions: [
-            [fromNode.lat, fromNode.lon],
-            [toNode.lat, toNode.lon],
-          ],
+          positions,
           routeClass: leg.route_class,
           from: leg.from,
           to: leg.to,
           distance: leg.distance_miles,
+          viaCount: Array.isArray(leg.via) ? leg.via.length : 0,
         };
       })
       .filter(Boolean);
@@ -159,7 +193,7 @@ function App() {
         >
           <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
 
-          {obstacles.no_fly_zones.map((zone, idx) => (
+          {(obstacles?.no_fly_zones ?? []).map((zone, idx) => (
             <Circle
               key={`nfz-${idx}`}
               center={[zone.lat, zone.lon]}
@@ -179,7 +213,7 @@ function App() {
             </Circle>
           ))}
 
-          {obstacles.slow_zones.map((zone, idx) => (
+          {(obstacles?.slow_zones ?? []).map((zone, idx) => (
             <Circle
               key={`slow-${idx}`}
               center={[zone.lat, zone.lon]}
@@ -205,6 +239,9 @@ function App() {
             const isStart = node.id === selectedStart;
             const isEnd = node.id === selectedEnd;
 
+            const wx = weather[node.id];
+            const wxColor = weatherColor(wx?.status);
+
             return (
               <div key={node.id}>
                 <Marker
@@ -219,13 +256,36 @@ function App() {
                     {node.name}
                     <br />
                     Type: {node.type}
+                    <br />
+                    <br />
+                    <b>Weather</b>
+                    <br />
+                    Status: {wx?.status ?? "loading"}
+                    <br />
+                    Wind: {wx?.wind_speed_mph ?? "N/A"} mph
+                    <br />
+                    Gusts: {wx?.wind_gusts_mph ?? "N/A"} mph
+                    <br />
+                    Visibility: {formatVisibilityMiles(wx?.visibility_m)} mi
+                    <br />
+                    Precip: {wx?.precipitation_mm ?? "N/A"} mm
                   </Popup>
                 </Marker>
+
+                <CircleMarker
+                  center={[node.lat, node.lon]}
+                  radius={9}
+                  pathOptions={{
+                    color: wxColor,
+                    weight: 3,
+                    fillOpacity: 0,
+                  }}
+                />
 
                 {(isStart || isEnd) && (
                   <CircleMarker
                     center={[node.lat, node.lon]}
-                    radius={12}
+                    radius={14}
                     pathOptions={{
                       color: isStart ? "green" : "red",
                       weight: 3,
@@ -254,6 +314,8 @@ function App() {
                 {segment.distance} mi
                 <br />
                 {segment.routeClass}
+                <br />
+                Detour points: {segment.viaCount}
               </Popup>
             </Polyline>
           ))}
@@ -293,6 +355,7 @@ function App() {
           <div style={{ color: "green" }}>Green = preferred</div>
           <div style={{ color: "goldenrod" }}>Yellow = acceptable</div>
           <div style={{ color: "orange" }}>Orange = less preferred</div>
+          <div style={{ color: "deepskyblue" }}>Blue = detour segment</div>
           <div style={{ color: "red" }}>Red circle = no-fly zone</div>
         </div>
 
@@ -329,6 +392,12 @@ function App() {
                   <span style={{ color: routeColor(leg.route_class) }}>
                     {leg.route_class}
                   </span>
+                  {Array.isArray(leg.via) && leg.via.length > 0 && (
+                    <>
+                      <br />
+                      via {leg.via.length} detour point(s)
+                    </>
+                  )}
                 </li>
               ))}
             </ul>
