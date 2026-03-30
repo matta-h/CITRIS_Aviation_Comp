@@ -95,23 +95,19 @@ NODES: Dict[str, dict] = {
 # -------------------------------------------------
 # Routing assumptions
 # -------------------------------------------------
+SHORT_HOP_THRESHOLD = 15.0
+SHORT_HOP_PENALTY = 4.0
+
 MAX_LEG_MILES = 85.0
-MIN_LEG_MILES = 25.0
 
 RISK_WEIGHTS = {
     "green": 1.00,
-    "yellow": 1.20,
-    "orange": 1.50,
+    "yellow": 1.10,
+    "orange": 1.20,
 }
 
 # Penalize each connection so fewer-stop routes are preferred
-STOP_PENALTY = 18.0
-
-# Prefer airport-based transfers over UC-to-UC chaining
-NODE_TYPE_PENALTY = {
-    "uc": 10.0,
-    "airport": 0.0,
-}
+STOP_PENALTY = 20
 
 # -------------------------------------------------
 # Manual edge classes for now
@@ -179,6 +175,19 @@ def distance_between(node_a: dict, node_b: dict) -> float:
 # -------------------------------------------------
 # Graph construction
 # -------------------------------------------------
+def classify_edge(a: str, b: str, dist: float) -> str:
+    """
+    Temporary classification until obstacle/weather layers are added.
+    For now, direct edges are allowed if within range.
+    """
+    # You can refine this later with terrain/water/airspace checks.
+    if dist <= 40:
+        return "green"
+    if dist <= 65:
+        return "yellow"
+    return "orange"
+
+
 def build_graph() -> Dict[str, List[dict]]:
     graph: Dict[str, List[dict]] = {node_id: [] for node_id in NODES}
 
@@ -188,28 +197,19 @@ def build_graph() -> Dict[str, List[dict]]:
             a = node_ids[i]
             b = node_ids[j]
 
-            rclass = route_class(a, b)
-            if rclass is None:
-                continue
-
             dist = distance_between(NODES[a], NODES[b])
 
-            # Range limit
+            # Hard range rule
             if dist > MAX_LEG_MILES:
                 continue
 
-            # Avoid tiny micro-hops
-            if dist < MIN_LEG_MILES:
-                continue
+            rclass = classify_edge(a, b, dist)
 
-            # Total routing cost
-            # - weighted by route quality
-            # - penalize every stop
-            # - penalize routing into UC nodes as intermediate connectors
+            short_hop_penalty = SHORT_HOP_PENALTY if dist < SHORT_HOP_THRESHOLD else 0.0
+
             cost = (
                 dist * RISK_WEIGHTS[rclass]
-                + STOP_PENALTY
-                + NODE_TYPE_PENALTY[NODES[b]["type"]]
+                + short_hop_penalty
             )
 
             graph[a].append({
@@ -237,14 +237,14 @@ def shortest_path(start: str, end: str) -> Optional[dict]:
         return None
 
     pq: List[Tuple[float, str, List[str]]] = [(0.0, start, [])]
-    visited = set()
+    best_cost = {}
 
     while pq:
         total_cost, current, path = heapq.heappop(pq)
 
-        if current in visited:
+        if current in best_cost and best_cost[current] <= total_cost:
             continue
-        visited.add(current)
+        best_cost[current] = total_cost
 
         path = path + [current]
 
@@ -274,8 +274,14 @@ def shortest_path(start: str, end: str) -> Optional[dict]:
 
         for edge in GRAPH[current]:
             neighbor = edge["to"]
-            if neighbor not in visited:
-                heapq.heappush(pq, (total_cost + edge["cost"], neighbor, path))
+
+            extra_cost = edge["cost"]
+
+            # Penalize intermediate stops
+            if current != start:
+                extra_cost += STOP_PENALTY
+
+            heapq.heappush(pq, (total_cost + extra_cost, neighbor, path))
 
     return None
 

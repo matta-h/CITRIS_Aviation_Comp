@@ -11,6 +11,13 @@ import "leaflet/dist/leaflet.css";
 import "leaflet-defaulticon-compatibility";
 import "leaflet-defaulticon-compatibility/dist/leaflet-defaulticon-compatibility.css";
 
+function routeColor(routeClass) {
+  if (routeClass === "green") return "green";
+  if (routeClass === "yellow") return "gold";
+  if (routeClass === "orange") return "orange";
+  return "red";
+}
+
 function App() {
   const [nodes, setNodes] = useState([]);
   const [selectedStart, setSelectedStart] = useState(null);
@@ -66,14 +73,25 @@ function App() {
     return map;
   }, [nodes]);
 
-  const polylinePositions = useMemo(() => {
-    if (!routeData || !routeData.path) return [];
+const routeSegments = useMemo(() => {
+  if (!routeData || !routeData.legs) return [];
 
-    return routeData.path
-      .map((nodeId) => nodeMap[nodeId])
-      .filter(Boolean)
-      .map((node) => [node.lat, node.lon]);
-  }, [routeData, nodeMap]);
+  return routeData.legs
+    .map((leg) => {
+      const fromNode = nodeMap[leg.from];
+      const toNode = nodeMap[leg.to];
+      if (!fromNode || !toNode) return null;
+
+      return {
+        positions: [
+          [fromNode.lat, fromNode.lon],
+          [toNode.lat, toNode.lon],
+        ],
+        routeClass: leg.route_class,
+      };
+    })
+    .filter(Boolean);
+}, [routeData, nodeMap]);
 
   const handleNodeSelect = (nodeId) => {
     if (!selectedStart) {
@@ -145,10 +163,16 @@ function App() {
               </div>
             );
           })}
-
-          {polylinePositions.length > 1 && (
-            <Polyline positions={polylinePositions} pathOptions={{ color: "blue", weight: 4 }} />
-          )}
+          {routeSegments.map((segment, idx) => (
+            <Polyline
+              key={idx}
+              positions={segment.positions}
+              pathOptions={{
+                color: routeColor(segment.routeClass),
+                weight: 5,
+              }}
+            />
+          ))}
         </MapContainer>
       </div>
 
