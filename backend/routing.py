@@ -121,12 +121,16 @@ NO_FLY_ZONES = [
         "lat": 37.68,
         "lon": -122.22,
         "radius_miles": 10.0,
+        "mode": "hard",
+        "hazard_type": "airspace",
     },
     {
         "name": "Monterey Bay Avoidance",
         "lat": 36.92,
         "lon": -121.95,
         "radius_miles": 8.0,
+        "mode": "hard",
+        "hazard_type": "water_safety",
     },
 ]
 
@@ -137,6 +141,8 @@ SLOW_ZONES = [
         "lon": -121.85,
         "radius_miles": 12.0,
         "penalty": 18.0,
+        "mode": "soft",
+        "hazard_type": "terrain",
     },
     {
         "name": "South Bay Caution",
@@ -144,6 +150,8 @@ SLOW_ZONES = [
         "lon": -121.95,
         "radius_miles": 10.0,
         "penalty": 12.0,
+        "mode": "soft",
+        "hazard_type": "airspace_congestion",
     },
 ]
 
@@ -202,6 +210,13 @@ def slow_zone_penalty(node_a: dict, node_b: dict) -> float:
         if edge_intersects_circle(node_a, node_b, zone):
             total += zone["penalty"]
     return total
+
+def slow_zone_hits(node_a: dict, node_b: dict) -> List[dict]:
+    hits = []
+    for zone in SLOW_ZONES:
+        if edge_intersects_circle(node_a, node_b, zone):
+            hits.append(zone)
+    return hits
 
 # -------------------------------------------------
 # Manual edge classes for now
@@ -408,6 +423,13 @@ def build_graph() -> Dict[str, List[dict]]:
                         "route_class": "detour",
                         "cost": cost,
                         "via": via_points,
+                        "hazards": [
+                            {
+                                "name": hit_zone["name"],
+                                "type": hit_zone["hazard_type"],
+                                "mode": hit_zone["mode"],
+                            }
+                        ],
                     })
 
                     graph[b].append({
@@ -416,12 +438,19 @@ def build_graph() -> Dict[str, List[dict]]:
                         "route_class": "detour",
                         "cost": cost,
                         "via": list(reversed(via_points)),
+                        "hazards": [
+                            {
+                                "name": hit_zone["name"],
+                                "type": hit_zone["hazard_type"],
+                                "mode": hit_zone["mode"],
+                            }
+                        ],
                     })
-
                 continue
 
             short_hop_penalty = SHORT_HOP_PENALTY if dist < SHORT_HOP_THRESHOLD else 0.0
-            obstacle_penalty = slow_zone_penalty(NODES[a], NODES[b])
+            slow_hits = slow_zone_hits(NODES[a], NODES[b])
+            obstacle_penalty = sum(zone["penalty"] for zone in slow_hits)
 
             wx_a = weather_data.get(a, {})
             wx_b = weather_data.get(b, {})
@@ -446,14 +475,31 @@ def build_graph() -> Dict[str, List[dict]]:
                 "distance_miles": dist,
                 "route_class": rclass,
                 "cost": cost,
+                "hazards": [
+                    {
+                        "name": z["name"],
+                        "type": z["hazard_type"],
+                        "mode": z["mode"],
+                        "penalty": z["penalty"],
+                    }
+                    for z in slow_hits
+                ],
             })
             graph[b].append({
                 "to": a,
                 "distance_miles": dist,
                 "route_class": rclass,
                 "cost": cost,
+                "hazards": [
+                    {
+                        "name": z["name"],
+                        "type": z["hazard_type"],
+                        "mode": z["mode"],
+                        "penalty": z["penalty"],
+                    }
+                    for z in slow_hits
+                ],
             })
-
     return graph
 
 # -------------------------------------------------
@@ -491,6 +537,7 @@ def shortest_path(start: str, end: str) -> Optional[dict]:
                     "to": b,
                     "distance_miles": round(edge["distance_miles"], 2),
                     "route_class": edge["route_class"],
+                    "hazards": edge.get("hazards", []),
                 }
 
                 if "via" in edge:

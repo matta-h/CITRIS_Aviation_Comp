@@ -398,6 +398,19 @@ function App() {
                       via {leg.via.length} detour point(s)
                     </>
                   )}
+                  {Array.isArray(leg.hazards) && leg.hazards.length > 0 && (
+                    <>
+                      <br />
+                      Hazards:
+                      <ul style={{ marginTop: "4px", paddingLeft: "18px" }}>
+                        {leg.hazards.map((hz, hzIdx) => (
+                          <li key={hzIdx}>
+                            {hz.name} ({hz.type}, {hz.mode})
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
                 </li>
               ))}
             </ul>
