@@ -6,35 +6,115 @@ from typing import Dict, List, Optional, Tuple
 
 # -------------------------------------------------
 # Finalized real-world nodes
+# capacity = simultaneous operating pads for now
+# parking = optional future storage count
 # -------------------------------------------------
 NODES: Dict[str, dict] = {
-    "UCB": {"name": "UC Berkeley", "lat": 37.875158, "lon": -122.261472, "type": "uc"},
-    "UCD": {"name": "UC Davis", "lat": 38.539703, "lon": -121.758061, "type": "uc"},
-    "UCSC": {"name": "UC Santa Cruz", "lat": 36.999100, "lon": -122.063486, "type": "uc"},
-    "UCM": {"name": "UC Merced", "lat": 37.369886, "lon": -120.415594, "type": "uc"},
-    "KSQL": {"name": "San Carlos Airport", "lat": 37.512517, "lon": -122.248736, "type": "airport"},
-    "KNUQ": {"name": "Moffett Federal Airfield", "lat": 37.407217, "lon": -122.048822, "type": "airport"},
-    "KLVK": {"name": "Livermore Municipal Airport", "lat": 37.694697, "lon": -121.829808, "type": "airport"},
-    "KCVH": {"name": "Hollister Municipal Airport", "lat": 36.891033, "lon": -121.403344, "type": "airport"},
-    "KSNS": {"name": "Salinas Municipal Airport", "lat": 36.665964, "lon": -121.610133, "type": "airport"},
-    "KOAR": {"name": "Marina Municipal Airport", "lat": 36.677764, "lon": -121.758731, "type": "airport"},
+    "UCB": {
+        "name": "UC Berkeley",
+        "lat": 37.875158,
+        "lon": -122.261472,
+        "type": "uc",
+        "capacity": 1,
+        "parking": 1,
+    },
+    "UCD": {
+        "name": "UC Davis",
+        "lat": 38.539703,
+        "lon": -121.758061,
+        "type": "uc",
+        "capacity": 1,
+        "parking": 1,
+    },
+    "UCSC": {
+        "name": "UC Santa Cruz",
+        "lat": 36.999100,
+        "lon": -122.063486,
+        "type": "uc",
+        "capacity": 1,
+        "parking": 1,
+    },
+    "UCM": {
+        "name": "UC Merced",
+        "lat": 37.369886,
+        "lon": -120.415594,
+        "type": "uc",
+        "capacity": 1,
+        "parking": 1,
+    },
+    "KSQL": {
+        "name": "San Carlos Airport",
+        "lat": 37.512517,
+        "lon": -122.248736,
+        "type": "airport",
+        "capacity": 2,
+        "parking": 4,
+    },
+    "KNUQ": {
+        "name": "Moffett Federal Airfield",
+        "lat": 37.407217,
+        "lon": -122.048822,
+        "type": "airport",
+        "capacity": 3,
+        "parking": 6,
+    },
+    "KLVK": {
+        "name": "Livermore Municipal Airport",
+        "lat": 37.694697,
+        "lon": -121.829808,
+        "type": "airport",
+        "capacity": 4,
+        "parking": 8,
+    },
+    "KCVH": {
+        "name": "Hollister Municipal Airport",
+        "lat": 36.891033,
+        "lon": -121.403344,
+        "type": "airport",
+        "capacity": 3,
+        "parking": 6,
+    },
+    "KSNS": {
+        "name": "Salinas Municipal Airport",
+        "lat": 36.665964,
+        "lon": -121.610133,
+        "type": "airport",
+        "capacity": 3,
+        "parking": 6,
+    },
+    "KOAR": {
+        "name": "Marina Municipal Airport",
+        "lat": 36.677764,
+        "lon": -121.758731,
+        "type": "airport",
+        "capacity": 2,
+        "parking": 4,
+    },
 }
 
 # -------------------------------------------------
 # Routing assumptions
 # -------------------------------------------------
-MAX_LEG_MILES = 80.0
+MAX_LEG_MILES = 85.0
+MIN_LEG_MILES = 25.0
 
-# You can tune these later
 RISK_WEIGHTS = {
     "green": 1.00,
     "yellow": 1.20,
     "orange": 1.50,
 }
 
+# Penalize each connection so fewer-stop routes are preferred
+STOP_PENALTY = 18.0
+
+# Prefer airport-based transfers over UC-to-UC chaining
+NODE_TYPE_PENALTY = {
+    "uc": 10.0,
+    "airport": 0.0,
+}
+
 # -------------------------------------------------
 # Manual edge classes for now
-# Later these can come from terrain/weather/airspace
 # -------------------------------------------------
 GREEN_EDGES = {
     tuple(sorted(("UCSC", "KOAR"))),
@@ -82,9 +162,6 @@ def route_class(a: str, b: str) -> Optional[str]:
 # Real geographic distance
 # -------------------------------------------------
 def haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """
-    Great-circle distance in miles.
-    """
     r_miles = 3958.7613
 
     phi1 = math.radians(lat1)
@@ -116,10 +193,24 @@ def build_graph() -> Dict[str, List[dict]]:
                 continue
 
             dist = distance_between(NODES[a], NODES[b])
+
+            # Range limit
             if dist > MAX_LEG_MILES:
                 continue
 
-            cost = dist * RISK_WEIGHTS[rclass]
+            # Avoid tiny micro-hops
+            if dist < MIN_LEG_MILES:
+                continue
+
+            # Total routing cost
+            # - weighted by route quality
+            # - penalize every stop
+            # - penalize routing into UC nodes as intermediate connectors
+            cost = (
+                dist * RISK_WEIGHTS[rclass]
+                + STOP_PENALTY
+                + NODE_TYPE_PENALTY[NODES[b]["type"]]
+            )
 
             graph[a].append({
                 "to": b,
@@ -178,6 +269,7 @@ def shortest_path(start: str, end: str) -> Optional[dict]:
                 "legs": legs,
                 "total_distance_miles": round(total_distance, 2),
                 "total_cost": round(total_cost, 2),
+                "num_legs": len(path) - 1,
             }
 
         for edge in GRAPH[current]:
@@ -189,11 +281,25 @@ def shortest_path(start: str, end: str) -> Optional[dict]:
 
 if __name__ == "__main__":
     print("Feasible graph:")
+    print(f"MAX_LEG_MILES = {MAX_LEG_MILES}")
+    print(f"MIN_LEG_MILES = {MIN_LEG_MILES}")
+    print(f"STOP_PENALTY = {STOP_PENALTY}")
+
     for node_id, edges in GRAPH.items():
         print(f"\n{node_id}:")
         for e in edges:
-            print(f"  -> {e['to']}: {e['distance_miles']:.2f} mi, {e['route_class']}")
+            print(
+                f"  -> {e['to']}: "
+                f"{e['distance_miles']:.2f} mi, "
+                f"{e['route_class']}, "
+                f"cost={e['cost']:.2f}"
+            )
+
+    print("\nExample route UCB -> UCD")
+    print(shortest_path("UCB", "UCD"))
 
     print("\nExample route UCD -> UCM")
-    result = shortest_path("UCD", "UCM")
-    print(result)
+    print(shortest_path("UCD", "UCM"))
+
+    print("\nExample route UCB -> KSNS")
+    print(shortest_path("UCB", "KSNS"))
