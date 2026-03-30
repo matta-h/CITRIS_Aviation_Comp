@@ -271,8 +271,8 @@ def distance_between(node_a: dict, node_b: dict) -> float:
 # -------------------------------------------------
 def generate_detour_nodes(a: dict, b: dict, zone: dict):
     """
-    Create 2 detour point pairs around a circular obstacle.
-    Uses local-mile coordinates, then converts back to lat/lon.
+    Generate two possible smooth arc detours around a circular no-fly zone.
+    Returns a list of candidate waypoint lists.
     """
 
     ref_lat = (a["lat"] + b["lat"] + zone["lat"]) / 3.0
@@ -281,13 +281,7 @@ def generate_detour_nodes(a: dict, b: dict, zone: dict):
     bx, by = to_local_miles(b["lat"], b["lon"], ref_lat)
     cx, cy = to_local_miles(zone["lat"], zone["lon"], ref_lat)
 
-    r = zone["radius_miles"]
-    offset = 0.45  # radians
-    detours = []
-
-    angle_a = math.atan2(ay - cy, ax - cx)
-    angle_b = math.atan2(by - cy, bx - cx)
-
+    r = zone["radius_miles"] * 1.15  # buffer outside no-fly circle
     miles_per_deg_lat = 69.0
     miles_per_deg_lon = 69.0 * math.cos(math.radians(ref_lat))
 
@@ -297,22 +291,43 @@ def generate_detour_nodes(a: dict, b: dict, zone: dict):
             "lon": x / miles_per_deg_lon,
         }
 
+    def normalize_angle(theta: float) -> float:
+        while theta <= -math.pi:
+            theta += 2 * math.pi
+        while theta > math.pi:
+            theta -= 2 * math.pi
+        return theta
+
+    angle_a = math.atan2(ay - cy, ax - cx)
+    angle_b = math.atan2(by - cy, bx - cx)
+
+    candidates = []
+
+    # direction = +1 means counterclockwise, -1 clockwise
     for direction in [1, -1]:
-        theta1 = angle_a + direction * offset
-        theta2 = angle_b - direction * offset
+        start_angle = angle_a
+        end_angle = angle_b
 
-        p1x = cx + (r * 1.2) * math.cos(theta1)
-        p1y = cy + (r * 1.2) * math.sin(theta1)
+        delta = normalize_angle(end_angle - start_angle)
 
-        p2x = cx + (r * 1.2) * math.cos(theta2)
-        p2y = cy + (r * 1.2) * math.sin(theta2)
+        if direction == 1 and delta < 0:
+            delta += 2 * math.pi
+        elif direction == -1 and delta > 0:
+            delta -= 2 * math.pi
 
-        p1 = local_to_latlon(p1x, p1y)
-        p2 = local_to_latlon(p2x, p2y)
+        steps = 8  # increase for smoother arcs
+        arc_points = []
 
-        detours.append((p1, p2))
+        for i in range(1, steps):
+            t = i / steps
+            theta = start_angle + delta * t
+            px = cx + r * math.cos(theta)
+            py = cy + r * math.sin(theta)
+            arc_points.append(local_to_latlon(px, py))
 
-    return detours
+        candidates.append(arc_points)
+
+    return candidates
 
 # -------------------------------------------------
 # Graph construction
@@ -352,14 +367,27 @@ def build_graph() -> Dict[str, List[dict]]:
             if hit_zone is not None:
                 detour_paths = generate_detour_nodes(NODES[a], NODES[b], hit_zone)
 
-                for p1, p2 in detour_paths:
-                    d1 = distance_between(NODES[a], p1)
-                    d2 = distance_between(p1, p2)
-                    d3 = distance_between(p2, NODES[b])
+                for via_points in detour_paths:
+                    route_points = [NODES[a], *via_points, NODES[b]]
 
-                    total_dist = d1 + d2 + d3
+                    total_dist = 0.0
+                    valid = True
 
-                    if total_dist > MAX_LEG_MILES * 1.5:
+                    for k in range(len(route_points) - 1):
+                        seg_start = route_points[k]
+                        seg_end = route_points[k + 1]
+
+                        # Do not allow any sub-segment to cut back through the no-fly zone
+                        if no_fly_hit(seg_start, seg_end) is not None:
+                            valid = False
+                            break
+
+                        total_dist += distance_between(seg_start, seg_end)
+
+                    if not valid:
+                        continue
+
+                    if total_dist > MAX_LEG_MILES * 1.6:
                         continue
 
                     wx_a = weather_data.get(a, {})
@@ -372,14 +400,14 @@ def build_graph() -> Dict[str, List[dict]]:
                         continue
 
                     weather_cost = penalty_a + penalty_b
-                    cost = total_dist * 1.3 + weather_cost
+                    cost = total_dist * 1.25 + weather_cost
 
                     graph[a].append({
                         "to": b,
                         "distance_miles": total_dist,
                         "route_class": "detour",
                         "cost": cost,
-                        "via": [p1, p2],
+                        "via": via_points,
                     })
 
                     graph[b].append({
@@ -387,7 +415,7 @@ def build_graph() -> Dict[str, List[dict]]:
                         "distance_miles": total_dist,
                         "route_class": "detour",
                         "cost": cost,
-                        "via": [p2, p1],
+                        "via": list(reversed(via_points)),
                     })
 
                 continue
