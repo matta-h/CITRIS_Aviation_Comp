@@ -6,10 +6,15 @@ import {
   Popup,
   Polyline,
   CircleMarker,
+  Circle,
 } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import "leaflet-defaulticon-compatibility";
 import "leaflet-defaulticon-compatibility/dist/leaflet-defaulticon-compatibility.css";
+
+function milesToMeters(miles) {
+  return miles * 1609.34;
+}
 
 function routeColor(routeClass) {
   if (routeClass === "green") return "green";
@@ -24,8 +29,28 @@ function App() {
   const [selectedEnd, setSelectedEnd] = useState(null);
   const [routeData, setRouteData] = useState(null);
   const [error, setError] = useState("");
+  const [obstacles, setObstacles] = useState({
+    no_fly_zones: [],
+    slow_zones: [],
+  });
 
   useEffect(() => {
+    fetch("http://127.0.0.1:8000/obstacles")
+      .then((res) => res.json())
+      .then((data) => {
+        setObstacles({
+          no_fly_zones: data?.no_fly_zones ?? [],
+          slow_zones: data?.slow_zones ?? [],
+        });
+      })
+      .catch(() => {
+        console.warn("Failed to load obstacles.");
+        setObstacles({
+          no_fly_zones: [],
+          slow_zones: [],
+        });
+      });
+
     fetch("http://127.0.0.1:8000/nodes")
       .then((res) => res.json())
       .then((data) => {
@@ -73,25 +98,28 @@ function App() {
     return map;
   }, [nodes]);
 
-const routeSegments = useMemo(() => {
-  if (!routeData || !routeData.legs) return [];
+  const routeSegments = useMemo(() => {
+    if (!routeData || !routeData.legs) return [];
 
-  return routeData.legs
-    .map((leg) => {
-      const fromNode = nodeMap[leg.from];
-      const toNode = nodeMap[leg.to];
-      if (!fromNode || !toNode) return null;
+    return routeData.legs
+      .map((leg) => {
+        const fromNode = nodeMap[leg.from];
+        const toNode = nodeMap[leg.to];
+        if (!fromNode || !toNode) return null;
 
-      return {
-        positions: [
-          [fromNode.lat, fromNode.lon],
-          [toNode.lat, toNode.lon],
-        ],
-        routeClass: leg.route_class,
-      };
-    })
-    .filter(Boolean);
-}, [routeData, nodeMap]);
+        return {
+          positions: [
+            [fromNode.lat, fromNode.lon],
+            [toNode.lat, toNode.lon],
+          ],
+          routeClass: leg.route_class,
+          from: leg.from,
+          to: leg.to,
+          distance: leg.distance_miles,
+        };
+      })
+      .filter(Boolean);
+  }, [routeData, nodeMap]);
 
   const handleNodeSelect = (nodeId) => {
     if (!selectedStart) {
@@ -108,7 +136,6 @@ const routeSegments = useMemo(() => {
       return;
     }
 
-    // If both already selected, restart selection with new start
     setSelectedStart(nodeId);
     setSelectedEnd(null);
     setRouteData(null);
@@ -125,8 +152,54 @@ const routeSegments = useMemo(() => {
   return (
     <div style={{ display: "flex", height: "100vh", width: "100%" }}>
       <div style={{ flex: 1 }}>
-        <MapContainer center={[37.5, -121.5]} zoom={7} style={{ height: "100%", width: "100%" }}>
+        <MapContainer
+          center={[37.5, -121.5]}
+          zoom={7}
+          style={{ height: "100%", width: "100%" }}
+        >
           <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+
+          {obstacles.no_fly_zones.map((zone, idx) => (
+            <Circle
+              key={`nfz-${idx}`}
+              center={[zone.lat, zone.lon]}
+              radius={milesToMeters(zone.radius_miles)}
+              pathOptions={{
+                color: "red",
+                fillColor: "red",
+                fillOpacity: 0.2,
+                weight: 2,
+              }}
+            >
+              <Popup>
+                <b>{zone.name}</b>
+                <br />
+                No-fly zone
+              </Popup>
+            </Circle>
+          ))}
+
+          {obstacles.slow_zones.map((zone, idx) => (
+            <Circle
+              key={`slow-${idx}`}
+              center={[zone.lat, zone.lon]}
+              radius={milesToMeters(zone.radius_miles)}
+              pathOptions={{
+                color: "orange",
+                fillColor: "yellow",
+                fillOpacity: 0.15,
+                weight: 2,
+              }}
+            >
+              <Popup>
+                <b>{zone.name}</b>
+                <br />
+                Slow / caution zone
+                <br />
+                Penalty: {zone.penalty}
+              </Popup>
+            </Circle>
+          ))}
 
           {nodes.map((node) => {
             const isStart = node.id === selectedStart;
@@ -163,6 +236,7 @@ const routeSegments = useMemo(() => {
               </div>
             );
           })}
+
           {routeSegments.map((segment, idx) => (
             <Polyline
               key={idx}
@@ -171,14 +245,24 @@ const routeSegments = useMemo(() => {
                 color: routeColor(segment.routeClass),
                 weight: 5,
               }}
-            />
+            >
+              <Popup>
+                <b>
+                  {segment.from} → {segment.to}
+                </b>
+                <br />
+                {segment.distance} mi
+                <br />
+                {segment.routeClass}
+              </Popup>
+            </Polyline>
           ))}
         </MapContainer>
       </div>
 
       <div
         style={{
-          width: "340px",
+          width: "360px",
           padding: "16px",
           borderLeft: "1px solid #ccc",
           background: "#f7f7f7",
@@ -204,6 +288,14 @@ const routeSegments = useMemo(() => {
           Clear Selection
         </button>
 
+        <div style={{ marginBottom: "16px" }}>
+          <strong>Legend</strong>
+          <div style={{ color: "green" }}>Green = preferred</div>
+          <div style={{ color: "goldenrod" }}>Yellow = acceptable</div>
+          <div style={{ color: "orange" }}>Orange = less preferred</div>
+          <div style={{ color: "red" }}>Red circle = no-fly zone</div>
+        </div>
+
         {error && (
           <div style={{ color: "darkred", marginBottom: "16px" }}>
             <strong>Error:</strong> {error}
@@ -220,24 +312,30 @@ const routeSegments = useMemo(() => {
               <strong>Total Distance:</strong> {routeData.total_distance_miles} mi
               <br />
               <strong>Total Cost:</strong> {routeData.total_cost}
+              <br />
+              <strong>Legs:</strong> {routeData.num_legs}
             </p>
 
             <h4>Legs</h4>
             <ul style={{ paddingLeft: "18px" }}>
               {routeData.legs.map((leg, idx) => (
-                <li key={idx} style={{ marginBottom: "8px" }}>
-                  <strong>{leg.from} → {leg.to}</strong>
+                <li key={idx} style={{ marginBottom: "10px" }}>
+                  <strong>
+                    {leg.from} → {leg.to}
+                  </strong>
                   <br />
-                  {leg.distance_miles} mi, {leg.route_class}
+                  {leg.distance_miles} mi
+                  <br />
+                  <span style={{ color: routeColor(leg.route_class) }}>
+                    {leg.route_class}
+                  </span>
                 </li>
               ))}
             </ul>
           </div>
         )}
 
-        {!routeData && !error && (
-          <p>No route selected yet.</p>
-        )}
+        {!routeData && !error && <p>No route selected yet.</p>}
       </div>
     </div>
   );

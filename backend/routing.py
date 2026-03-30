@@ -110,6 +110,98 @@ RISK_WEIGHTS = {
 STOP_PENALTY = 20
 
 # -------------------------------------------------
+# Static obstacle zones
+# radius in miles
+# -------------------------------------------------
+NO_FLY_ZONES = [
+    {
+        "name": "SF Bay Core Avoidance",
+        "lat": 37.68,
+        "lon": -122.22,
+        "radius_miles": 10.0,
+    },
+    {
+        "name": "Monterey Bay Avoidance",
+        "lat": 36.92,
+        "lon": -121.95,
+        "radius_miles": 8.0,
+    },
+]
+
+SLOW_ZONES = [
+    {
+        "name": "Diablo Corridor Caution",
+        "lat": 37.55,
+        "lon": -121.85,
+        "radius_miles": 12.0,
+        "penalty": 18.0,
+    },
+    {
+        "name": "South Bay Caution",
+        "lat": 37.35,
+        "lon": -121.95,
+        "radius_miles": 10.0,
+        "penalty": 12.0,
+    },
+]
+
+def to_local_miles(lat: float, lon: float, ref_lat: float) -> Tuple[float, float]:
+    """
+    Convert lat/lon to approximate local Cartesian miles.
+    Good enough for regional obstacle checks.
+    """
+    miles_per_deg_lat = 69.0
+    miles_per_deg_lon = 69.0 * math.cos(math.radians(ref_lat))
+    x = lon * miles_per_deg_lon
+    y = lat * miles_per_deg_lat
+    return x, y
+
+
+def point_to_segment_distance_miles(
+    px: float, py: float,
+    x1: float, y1: float,
+    x2: float, y2: float
+) -> float:
+    dx = x2 - x1
+    dy = y2 - y1
+
+    if dx == 0 and dy == 0:
+        return math.hypot(px - x1, py - y1)
+
+    t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
+    t = max(0.0, min(1.0, t))
+
+    closest_x = x1 + t * dx
+    closest_y = y1 + t * dy
+    return math.hypot(px - closest_x, py - closest_y)
+
+
+def edge_intersects_circle(node_a: dict, node_b: dict, zone: dict) -> bool:
+    ref_lat = (node_a["lat"] + node_b["lat"] + zone["lat"]) / 3.0
+
+    x1, y1 = to_local_miles(node_a["lat"], node_a["lon"], ref_lat)
+    x2, y2 = to_local_miles(node_b["lat"], node_b["lon"], ref_lat)
+    px, py = to_local_miles(zone["lat"], zone["lon"], ref_lat)
+
+    d = point_to_segment_distance_miles(px, py, x1, y1, x2, y2)
+    return d <= zone["radius_miles"]
+
+
+def no_fly_hit(node_a: dict, node_b: dict) -> Optional[dict]:
+    for zone in NO_FLY_ZONES:
+        if edge_intersects_circle(node_a, node_b, zone):
+            return zone
+    return None
+
+
+def slow_zone_penalty(node_a: dict, node_b: dict) -> float:
+    total = 0.0
+    for zone in SLOW_ZONES:
+        if edge_intersects_circle(node_a, node_b, zone):
+            total += zone["penalty"]
+    return total
+
+# -------------------------------------------------
 # Manual edge classes for now
 # -------------------------------------------------
 GREEN_EDGES = {
@@ -203,13 +295,21 @@ def build_graph() -> Dict[str, List[dict]]:
             if dist > MAX_LEG_MILES:
                 continue
 
+            # Temporary distance-based route class
             rclass = classify_edge(a, b, dist)
 
+            # Hard no-fly rejection
+            hit_zone = no_fly_hit(NODES[a], NODES[b])
+            if hit_zone is not None:
+                continue
+
             short_hop_penalty = SHORT_HOP_PENALTY if dist < SHORT_HOP_THRESHOLD else 0.0
+            obstacle_penalty = slow_zone_penalty(NODES[a], NODES[b])
 
             cost = (
                 dist * RISK_WEIGHTS[rclass]
                 + short_hop_penalty
+                + obstacle_penalty
             )
 
             graph[a].append({
