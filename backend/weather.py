@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional
+from datetime import datetime, timedelta
 import requests
 
 UNSAFE_GUST_MPH = 30.0
@@ -31,37 +32,77 @@ def weather_status(
     return "good"
 
 
-def fetch_weather_for_nodes(nodes: Dict[str, dict]) -> Dict[str, dict]:
+def weather_penalty(entry: dict) -> float:
+    status = entry.get("status", "good")
+    if status == "unsafe":
+        return float("inf")
+    if status == "caution":
+        return 20.0
+    return 0.0
+
+
+def nearest_hour_index(times: list[str], target_iso: str) -> int:
+    target = datetime.fromisoformat(target_iso)
+    parsed = [datetime.fromisoformat(t) for t in times]
+    best_idx = min(range(len(parsed)), key=lambda i: abs((parsed[i] - target).total_seconds()))
+    return best_idx
+
+
+def fetch_forecast_for_node(node: dict, target_time_iso: Optional[str] = None) -> dict:
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={node['lat']}"
+        f"&longitude={node['lon']}"
+        "&hourly=wind_speed_10m,wind_gusts_10m,visibility,precipitation"
+        "&wind_speed_unit=mph"
+        "&forecast_days=2"
+        "&timezone=auto"
+    )
+
+    r = requests.get(url, timeout=10)
+    r.raise_for_status()
+    data = r.json().get("hourly", {})
+
+    times = data.get("time", [])
+    winds = data.get("wind_speed_10m", [])
+    gusts = data.get("wind_gusts_10m", [])
+    vis = data.get("visibility", [])
+    precip = data.get("precipitation", [])
+
+    if not times:
+        raise ValueError("No hourly forecast data returned")
+
+    if target_time_iso is None:
+        idx = 0
+        forecast_time = times[idx]
+    else:
+        idx = nearest_hour_index(times, target_time_iso)
+        forecast_time = times[idx]
+
+    wind = float(winds[idx]) if idx < len(winds) else 0.0
+    gust = float(gusts[idx]) if idx < len(gusts) else 0.0
+    visibility = float(vis[idx]) if idx < len(vis) else 99999.0
+    precipitation = float(precip[idx]) if idx < len(precip) else 0.0
+
+    return {
+        "forecast_time": forecast_time,
+        "wind_speed_mph": wind,
+        "wind_gusts_mph": gust,
+        "visibility_m": visibility,
+        "precipitation_mm": precipitation,
+        "status": weather_status(wind, gust, visibility, precipitation),
+    }
+
+
+def fetch_weather_for_nodes(nodes: Dict[str, dict], target_time_iso: Optional[str] = None) -> Dict[str, dict]:
     results: Dict[str, dict] = {}
 
     for node_id, node in nodes.items():
-        url = (
-            "https://api.open-meteo.com/v1/forecast"
-            f"?latitude={node['lat']}"
-            f"&longitude={node['lon']}"
-            "&current=wind_speed_10m,wind_gusts_10m,visibility,precipitation"
-            "&wind_speed_unit=mph"
-        )
-
         try:
-            r = requests.get(url, timeout=10)
-            r.raise_for_status()
-            data = r.json().get("current", {})
-
-            wind = float(data.get("wind_speed_10m", 0.0))
-            gust = float(data.get("wind_gusts_10m", 0.0))
-            visibility = float(data.get("visibility", 99999.0))
-            precip = float(data.get("precipitation", 0.0))
-
-            results[node_id] = {
-                "wind_speed_mph": wind,
-                "wind_gusts_mph": gust,
-                "visibility_m": visibility,
-                "precipitation_mm": precip,
-                "status": weather_status(wind, gust, visibility, precip),
-            }
+            results[node_id] = fetch_forecast_for_node(node, target_time_iso)
         except Exception as exc:
             results[node_id] = {
+                "forecast_time": target_time_iso,
                 "wind_speed_mph": None,
                 "wind_gusts_mph": None,
                 "visibility_m": None,
@@ -73,10 +114,6 @@ def fetch_weather_for_nodes(nodes: Dict[str, dict]) -> Dict[str, dict]:
     return results
 
 
-def weather_penalty(entry: dict) -> float:
-    status = entry.get("status", "good")
-    if status == "unsafe":
-        return float("inf")
-    if status == "caution":
-        return 20.0
-    return 0.0
+def add_minutes_iso(start_iso: str, minutes: float) -> str:
+    dt = datetime.fromisoformat(start_iso)
+    return (dt + timedelta(minutes=minutes)).isoformat(timespec="minutes")

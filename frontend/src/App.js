@@ -42,6 +42,7 @@ function App() {
   const [selectedEnd, setSelectedEnd] = useState(null);
   const [routeData, setRouteData] = useState(null);
   const [error, setError] = useState("");
+  const [isRouting, setIsRouting] = useState(false);
   const [weather, setWeather] = useState({});
   const [obstacles, setObstacles] = useState({
     no_fly_zones: [],
@@ -97,6 +98,9 @@ function App() {
 
     const url = `http://127.0.0.1:8000/route?start=${selectedStart}&end=${selectedEnd}`;
 
+    setIsRouting(true);
+    setError("");
+
     fetch(url)
       .then((res) => {
         if (!res.ok) {
@@ -107,10 +111,12 @@ function App() {
       .then((data) => {
         setRouteData(data);
         setError("");
+        setIsRouting(false);
       })
       .catch((err) => {
         setRouteData(null);
         setError(err.message || "Failed to fetch route.");
+        setIsRouting(false);
       });
   }, [selectedStart, selectedEnd]);
 
@@ -359,6 +365,23 @@ function App() {
           <div style={{ color: "red" }}>Red circle = no-fly zone</div>
         </div>
 
+        {isRouting && (
+          <div
+            style={{
+              marginBottom: "16px",
+              padding: "12px",
+              borderRadius: "8px",
+              background: "#e8f1ff",
+              border: "1px solid #b8cffc",
+              color: "#1f4ea3",
+            }}
+          >
+            <strong>Calculating route...</strong>
+            <br />
+            Checking feasibility, weather, and routing cost.
+          </div>
+        )}
+
         {error && (
           <div style={{ color: "darkred", marginBottom: "16px" }}>
             <strong>Error:</strong> {error}
@@ -417,7 +440,7 @@ function App() {
           </div>
         )}
 
-        {!routeData && !error && <p>No route selected yet.</p>}
+        {!routeData && !error && !isRouting && <p>No route selected yet.</p>}
       </div>
     </div>
   );

@@ -27,8 +27,8 @@ def get_graph():
     return build_graph()
 
 @app.get("/route")
-def get_route(start: str, end: str):
-    result = shortest_path(start, end)
+def get_route(start: str, end: str, departure_time: str | None = None):
+    result = shortest_path(start, end, departure_time)
     if result is None:
         raise HTTPException(status_code=404, detail="No feasible route found")
     return result
@@ -41,8 +41,12 @@ def get_obstacles():
     }
 
 @app.get("/weather")
-def get_weather():
+def get_weather(target_time: str | None = None):
     global WEATHER_CACHE, WEATHER_LAST_FETCH
+
+    # If caller asks for a specific time, do not use the generic cache
+    if target_time is not None:
+        return fetch_weather_for_nodes(NODES, target_time)
 
     now = time.time()
 

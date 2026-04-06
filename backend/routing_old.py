@@ -363,7 +363,6 @@ def classify_edge(a: str, b: str, dist: float) -> str:
 UNSAFE_WEATHER_PENALTY = 0.0
 def build_graph(clock=None) -> Dict[str, List[dict]]:
     graph: Dict[str, List[dict]] = {node_id: [] for node_id in NODES}
-
     if clock:
         current_time_iso = clock.current_time.isoformat(timespec="minutes")
         weather_data = fetch_weather_for_nodes(NODES, current_time_iso)
@@ -514,15 +513,21 @@ def build_graph(clock=None) -> Dict[str, List[dict]]:
 # -------------------------------------------------
 CRUISE_SPEED_MPH = 120.0
 
+
+def bucket_minutes(value: float, step: int = 15) -> int:
+    return int(step * round(value / step))
+
+
 from itertools import count
 
 def bucket_minutes(value: float, step: int = 15) -> int:
     return int(step * round(value / step))
 
-def shortest_path(start: str,
+def shortest_path(
+    start: str,
     end: str,
     departure_time_iso: str | None = None,
-    clock=None,
+    clock=None
 ) -> Optional[dict]:
     graph = build_graph(clock)
 
@@ -539,6 +544,7 @@ def shortest_path(start: str,
     ]
 
     best_cost = {}
+    weather_cache = {}
 
     while pq:
         total_cost, _, current, elapsed_minutes, path_nodes, path_edges = heapq.heappop(pq)
@@ -593,10 +599,20 @@ def shortest_path(start: str,
             leg_minutes = (edge["distance_miles"] / CRUISE_SPEED_MPH) * 60.0
             arrival_minutes = elapsed_minutes + leg_minutes
             eta_iso = add_minutes_iso(departure_time_iso, arrival_minutes)
-            # Step 1 optimization: use only the graph weather that was
-            # loaded once at the simulation time. Do not re-query weather
-            # for every candidate neighbor/ETA yet.
-            extra_cost = edge["cost"]
+
+            cache_key = (neighbor, bucket_minutes(arrival_minutes, 15))
+
+            if cache_key not in weather_cache:
+                future_weather = fetch_weather_for_nodes({neighbor: NODES[neighbor]}, eta_iso)
+                weather_cache[cache_key] = future_weather.get(neighbor, {})
+
+            wx_neighbor = weather_cache[cache_key]
+            wx_penalty = weather_penalty(wx_neighbor)
+
+            if wx_penalty == float("inf"):
+                wx_penalty = 250.0
+
+            extra_cost = edge["cost"] + wx_penalty
 
             if current != start:
                 extra_cost += STOP_PENALTY
