@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+from typing import Dict, Optional, Tuple
+from datetime import datetime
+import requests
+
+# -----------------------------
+# Thresholds (same as before)
+# -----------------------------
+UNSAFE_GUST_MPH = 30.0
+UNSAFE_WIND_MPH = 25.0
+UNSAFE_VISIBILITY_M = 3000.0
+UNSAFE_PRECIPITATION = 6.0
+
+CAUTION_GUST_MPH = 22.0
+CAUTION_WIND_MPH = 18.0
+CAUTION_VISIBILITY_M = 8000.0
+CAUTION_PRECIP_MM = 2.5
+
+# -----------------------------
+# Cache (VERY IMPORTANT)
+# -----------------------------
+WEATHER_CACHE: Dict[Tuple[str, str], dict] = {}
+
+# -----------------------------
+# Status logic (unchanged)
+# -----------------------------
+def weather_status(wind, gust, visibility, precip):
+    if gust >= UNSAFE_GUST_MPH or wind >= UNSAFE_WIND_MPH or visibility < UNSAFE_VISIBILITY_M:
+        return "unsafe"
+    if (
+        gust >= CAUTION_GUST_MPH
+        or wind >= CAUTION_WIND_MPH
+        or visibility < CAUTION_VISIBILITY_M
+        or precip > CAUTION_PRECIP_MM
+    ):
+        return "caution"
+    return "good"
+
+def weather_penalty(entry: dict) -> float:
+    status = entry.get("status", "good")
+    if status == "unsafe":
+        return float("inf")
+    if status == "caution":
+        return 20.0
+    return 0.0
+
+# -----------------------------
+# Time matching
+# -----------------------------
+def nearest_hour_index(times: list[str], target_iso: str) -> int:
+    target = datetime.fromisoformat(target_iso)
+    parsed = [datetime.fromisoformat(t) for t in times]
+    return min(range(len(parsed)), key=lambda i: abs((parsed[i] - target).total_seconds()))
+
+# -----------------------------
+# MAIN HISTORICAL FETCH
+# -----------------------------
+def fetch_historical_weather_for_node(node: dict, target_time_iso: str) -> dict:
+    target_dt = datetime.fromisoformat(target_time_iso)
+    day_str = target_dt.date().isoformat()
+
+    cache_key = (node["name"], target_time_iso)
+    if cache_key in WEATHER_CACHE:
+        return WEATHER_CACHE[cache_key]
+
+    url = (
+        "https://archive-api.open-meteo.com/v1/archive"
+        f"?latitude={node['lat']}"
+        f"&longitude={node['lon']}"
+        f"&start_date={day_str}"
+        f"&end_date={day_str}"
+        "&hourly=wind_speed_10m,wind_gusts_10m,visibility,precipitation"
+        "&wind_speed_unit=mph"
+        "&timezone=auto"
+    )
+
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+
+    data = r.json().get("hourly", {})
+
+    times = data.get("time", [])
+    winds = data.get("wind_speed_10m", [])
+    gusts = data.get("wind_gusts_10m", [])
+    vis = data.get("visibility", [])
+    precip = data.get("precipitation", [])
+
+    if not times:
+        raise ValueError("No historical weather data returned")
+
+    idx = nearest_hour_index(times, target_time_iso)
+
+    wind_raw = winds[idx] if idx < len(winds) else None
+    gust_raw = gusts[idx] if idx < len(gusts) else None
+    visibility_raw = vis[idx] if idx < len(vis) else None
+    precip_raw = precip[idx] if idx < len(precip) else None
+
+    wind = float(wind_raw) if wind_raw is not None else 0.0
+    gust = float(gust_raw) if gust_raw is not None else 0.0
+    visibility = float(visibility_raw) if visibility_raw is not None else 99999.0
+    precipitation = float(precip_raw) if precip_raw is not None else 0.0
+
+    result = {
+        "forecast_time": times[idx],
+        "wind_speed_mph": wind,
+        "wind_gusts_mph": gust,
+        "visibility_m": visibility,
+        "precipitation_mm": precipitation,
+        "status": weather_status(wind, gust, visibility, precipitation),
+    }
+
+    WEATHER_CACHE[cache_key] = result
+    return result
+
+# -----------------------------
+# MULTI-NODE FETCH
+# -----------------------------
+def fetch_weather_for_nodes(nodes: Dict[str, dict], target_time_iso: Optional[str] = None) -> Dict[str, dict]:
+    results = {}
+
+    if target_time_iso is None:
+        target_time_iso = datetime.now().replace(minute=0, second=0).isoformat(timespec="minutes")
+
+    for node_id, node in nodes.items():
+        try:
+            results[node_id] = fetch_historical_weather_for_node(node, target_time_iso)
+        except Exception as exc:
+            results[node_id] = {
+                "status": "unknown",
+                "error": str(exc),
+            }
+
+    return results

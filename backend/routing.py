@@ -3,7 +3,8 @@ from __future__ import annotations
 import requests
 import math
 import heapq
-from backend.weather import fetch_weather_for_nodes, weather_penalty, add_minutes_iso
+from backend.weather_history import fetch_weather_for_nodes, weather_penalty
+from backend.weather import add_minutes_iso
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 

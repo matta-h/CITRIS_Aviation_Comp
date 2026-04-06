@@ -31,9 +31,27 @@ function weatherColor(status) {
   return "gray";
 }
 
+function gridRadiusFromWind(wind) {
+  if (wind == null) return 4;
+  if (wind < 5) return 4;
+  if (wind < 10) return 6;
+  if (wind < 15) return 8;
+  return 10;
+}
+
 function formatVisibilityMiles(meters) {
   if (meters == null) return "N/A";
   return (meters / 1609.34).toFixed(1);
+}
+
+function hazardFillColor(status) {
+  if (status === "unsafe") return "red";
+  if (status === "caution") return "orange";
+  return null;
+}
+
+function gridCellRadiusMeters() {
+  return 16000; // about 10 miles
 }
 
 function App() {
@@ -48,6 +66,11 @@ function App() {
     no_fly_zones: [],
     slow_zones: [],
   });
+  const [weatherGrid, setWeatherGrid] = useState([]);
+  const [gridTime, setGridTime] = useState("2024-01-15T08:00");
+  const [showWeatherGrid, setShowWeatherGrid] = useState(true);
+  const [showHazardRegions, setShowHazardRegions] = useState(false);
+  const [showGridPoints, setShowGridPoints] = useState(true);
 
   useEffect(() => {
     fetch("http://127.0.0.1:8000/obstacles")
@@ -119,6 +142,23 @@ function App() {
         setIsRouting(false);
       });
   }, [selectedStart, selectedEnd]);
+
+  useEffect(() => {
+    if (!showWeatherGrid || !gridTime) {
+      setWeatherGrid([]);
+      return;
+    }
+
+    fetch(`http://127.0.0.1:8000/weather-grid?target_time=${encodeURIComponent(gridTime)}`)
+      .then((res) => res.json())
+      .then((data) => {
+        setWeatherGrid(Array.isArray(data) ? data : []);
+      })
+      .catch(() => {
+        console.warn("Failed to load weather grid.");
+        setWeatherGrid([]);
+      });
+  }, [gridTime, showWeatherGrid]);
 
   const nodeMap = useMemo(() => {
     const map = {};
@@ -241,6 +281,84 @@ function App() {
             </Circle>
           ))}
 
+          {showGridPoints &&
+            weatherGrid.map((point, idx) => {
+              const wx = point.weather || {};
+              const statusColor = weatherColor(wx.status);
+              const wind = wx.wind_speed_mph;
+
+              return (
+                <CircleMarker
+                  key={`grid-${idx}`}
+                  center={[point.lat, point.lon]}
+                  radius={gridRadiusFromWind(wind)}
+                  pathOptions={{
+                    color: statusColor,
+                    fillColor: statusColor,
+                    fillOpacity: 0.35,
+                    weight: 1,
+                  }}
+                >
+                  <Popup>
+                    <b>Weather Grid Point</b>
+                    <br />
+                    Lat: {point.lat.toFixed(3)}
+                    <br />
+                    Lon: {point.lon.toFixed(3)}
+                    <br />
+                    Time: {wx.forecast_time ?? "N/A"}
+                    <br />
+                    Status: {wx.status ?? "unknown"}
+                    <br />
+                    Wind: {wx.wind_speed_mph ?? "N/A"} mph
+                    <br />
+                    Gusts: {wx.wind_gusts_mph ?? "N/A"} mph
+                    <br />
+                    Precip: {wx.precipitation_mm ?? "N/A"} mm
+                  </Popup>
+                </CircleMarker>
+              );
+            })}
+
+          {showHazardRegions &&
+            weatherGrid
+              .filter((point) => {
+                const status = point.weather?.status;
+                return status === "caution" || status === "unsafe";
+              })
+              .map((point, idx) => {
+                const wx = point.weather || {};
+                const fill = hazardFillColor(wx.status);
+
+                return (
+                  <Circle
+                    key={`hazard-${idx}`}
+                    center={[point.lat, point.lon]}
+                    radius={gridCellRadiusMeters()}
+                    pathOptions={{
+                      color: fill,
+                      fillColor: fill,
+                      fillOpacity: wx.status === "unsafe" ? 0.28 : 0.18,
+                      weight: 1,
+                    }}
+                  >
+                    <Popup>
+                      <b>Hazard Region</b>
+                      <br />
+                      Status: {wx.status ?? "unknown"}
+                      <br />
+                      Time: {wx.forecast_time ?? "N/A"}
+                      <br />
+                      Wind: {wx.wind_speed_mph ?? "N/A"} mph
+                      <br />
+                      Gusts: {wx.wind_gusts_mph ?? "N/A"} mph
+                      <br />
+                      Precip: {wx.precipitation_mm ?? "N/A"} mm
+                    </Popup>
+                  </Circle>
+                );
+              })}
+
           {nodes.map((node) => {
             const isStart = node.id === selectedStart;
             const isEnd = node.id === selectedEnd;
@@ -355,6 +473,46 @@ function App() {
         <button onClick={clearSelection} style={{ marginBottom: "16px" }}>
           Clear Selection
         </button>
+
+        <div style={{ marginBottom: "16px" }}>
+          <strong>Weather Overlay</strong>
+          <br />
+
+          <label style={{ display: "block", marginTop: "8px" }}>
+            <input
+              type="checkbox"
+              checked={showGridPoints}
+              onChange={(e) => setShowGridPoints(e.target.checked)}
+              style={{ marginRight: "8px" }}
+            />
+            Show grid points
+          </label>
+
+          <label style={{ display: "block", marginTop: "8px" }}>
+            <input
+              type="checkbox"
+              checked={showHazardRegions}
+              onChange={(e) => setShowHazardRegions(e.target.checked)}
+              style={{ marginRight: "8px" }}
+            />
+            Show hazard regions
+          </label>
+
+          <label style={{ display: "block", marginTop: "10px" }}>
+            Replay time:
+            <input
+              type="datetime-local"
+              value={gridTime}
+              onChange={(e) => setGridTime(e.target.value)}
+              style={{
+                display: "block",
+                marginTop: "6px",
+                width: "100%",
+                padding: "6px",
+              }}
+            />
+          </label>
+        </div>
 
         <div style={{ marginBottom: "16px" }}>
           <strong>Legend</strong>
