@@ -3,9 +3,9 @@ from __future__ import annotations
 import numpy as np
 import requests
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
+from requests.exceptions import HTTPError
 import threading
-from datetime import datetime
 
 # -----------------------------
 # Bounding box
@@ -115,6 +115,18 @@ def generate_grid_points() -> List[Dict]:
             )
     return grid
 
+def get_latest_cached_grid() -> Optional[List[Dict]]:
+    if HOURLY_GRID_CACHE:
+        latest_key = max(HOURLY_GRID_CACHE.keys())
+        return HOURLY_GRID_CACHE[latest_key]
+
+    for date_str in sorted(DAY_GRID_CACHE.keys(), reverse=True):
+        day_map = DAY_GRID_CACHE[date_str]
+        if day_map:
+            latest_key = max(day_map.keys())
+            return day_map[latest_key]
+
+    return None
 
 def fetch_weather_grid_batched(target_time_iso: str) -> List[Dict]:
     target_time_iso = normalize_hour_iso(target_time_iso)
@@ -140,9 +152,31 @@ def fetch_weather_grid_batched(target_time_iso: str) -> List[Dict]:
         "&timezone=auto"
     )
 
-    r = requests.get(url, timeout=60)
-    r.raise_for_status()
-    data = r.json()
+    try:
+        r = requests.get(url, timeout=60)
+        r.raise_for_status()
+        data = r.json()
+    except HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else None
+
+        if status_code == 429:
+            fallback = get_latest_cached_grid()
+            if fallback is not None:
+                append_log(f"429 from Open-Meteo for {target_time_iso}; using latest cached grid instead")
+                HOURLY_GRID_CACHE[target_time_iso] = list(fallback)
+                return list(fallback)
+
+            append_log(f"429 from Open-Meteo for {target_time_iso}; no cached fallback available")
+            return []
+
+        raise
+    except Exception as exc:
+        fallback = get_latest_cached_grid()
+        if fallback is not None:
+            append_log(f"Weather fetch failed for {target_time_iso}: {exc}; using latest cached grid instead")
+            HOURLY_GRID_CACHE[target_time_iso] = fallback
+            return fallback
+        raise
 
     # If only one coordinate is returned, Open-Meteo may return a dict instead of a list.
     # Normalize to a list for consistent handling.
@@ -239,6 +273,7 @@ def _preload_weather_day_worker(date_str: str) -> None:
             append_log(f"Loading {timestamp}")
 
             DAY_GRID_CACHE[date_str][timestamp] = fetch_weather_grid_batched(timestamp)
+            HOURLY_GRID_CACHE[timestamp] = DAY_GRID_CACHE[date_str][timestamp]
 
             with PRELOAD_LOCK:
                 PRELOAD_STATUS["completed_hours"] = hour + 1
@@ -268,6 +303,9 @@ def get_cached_weather_grid(target_time_iso: str) -> List[Dict]:
     normalized = normalize_hour_iso(target_time_iso)
     dt = datetime.fromisoformat(normalized)
     date_str = dt.date().isoformat()
+
+    if normalized in HOURLY_GRID_CACHE:
+        return HOURLY_GRID_CACHE[normalized]
 
     if date_str in DAY_GRID_CACHE and normalized in DAY_GRID_CACHE[date_str]:
         return DAY_GRID_CACHE[date_str][normalized]

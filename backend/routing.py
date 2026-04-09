@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 from backend.weather_history import fetch_weather_for_nodes
 from backend.weather_grid import get_cached_weather_grid
 from backend.weather import add_minutes_iso
-from backend.routing import (
+from backend.routing_single import (
     NODES,
     NO_FLY_ZONES,
     SLOW_ZONES,
@@ -21,9 +21,16 @@ from backend.routing import (
     point_to_segment_distance_miles,
 )
 
-FIELD_STEP_MILES = 8.0
-FIELD_NEIGHBOR_RADIUS_MILES = 16.0
-AIRPORT_CONNECT_RADIUS_MILES = 20.0
+FIELD_STEP_MILES = 2.5
+FIELD_NEIGHBOR_RADIUS_MILES = 7.5
+AIRPORT_CONNECT_RADIUS_MILES = 15.0
+
+HARD_BUFFER_FACTOR = 1.15
+SOFT_BUFFER_FACTOR = 0.90
+
+EFFECTIVE_AIRSPEED_MPH = 120.0
+TRANSFER_TIME_MIN = 30.0
+TIME_TIE_THRESHOLD_MIN = 5.0
 
 def build_weather_hazard_zones(target_time_iso: str) -> List[dict]:
     grid = get_cached_weather_grid(target_time_iso)
@@ -60,7 +67,7 @@ def point_in_circle(lat: float, lon: float, zone: dict) -> bool:
     ref_lat = (lat + zone["lat"]) / 2.0
     x, y = to_local_miles(lat, lon, ref_lat)
     cx, cy = to_local_miles(zone["lat"], zone["lon"], ref_lat)
-    r = scaled_hazard_radius_miles(zone["radius_miles"])
+    r = scaled_hazard_radius_miles(zone["radius_miles"]) * HARD_BUFFER_FACTOR
     return math.hypot(x - cx, y - cy) <= r
 
 def edge_hits_circle(a: dict, b: dict, zone: dict) -> bool:
@@ -72,7 +79,7 @@ def edge_intersects_point_pair(lat1: float, lon1: float, lat2: float, lon2: floa
     x2, y2 = to_local_miles(lat2, lon2, ref_lat)
     px, py = to_local_miles(zone["lat"], zone["lon"], ref_lat)
     d = point_to_segment_distance_miles(px, py, x1, y1, x2, y2)
-    r = scaled_hazard_radius_miles(zone["radius_miles"])
+    r = scaled_hazard_radius_miles(zone["radius_miles"]) * HARD_BUFFER_FACTOR
     return d <= r
 
 def all_hard_zones(weather_zones: List[dict]) -> List[dict]:
@@ -120,15 +127,51 @@ def build_field_points(target_time_iso: str) -> List[dict]:
 
     return points
 
-def soft_cost_for_edge(a: dict, b: dict, soft_zones: List[dict]) -> float:
+def soft_penalty_minutes_for_edge(
+    a: dict,
+    b: dict,
+    soft_zones: List[dict],
+    flight_time_min: float,
+) -> float:
     extra = 0.0
+    sample_ts = [0.2, 0.4, 0.6, 0.8]
+
     for z in soft_zones:
-        if edge_hits_circle(a, b, z):
-            if z["hazard_type"] == "weather":
-                extra += HAZARD_SETTINGS["caution_penalty"]
-            else:
-                extra += z.get("penalty", 10.0)
-    return extra
+        zone_penalty = 0.0
+
+        for t in sample_ts:
+            lat = a["lat"] + t * (b["lat"] - a["lat"])
+            lon = a["lon"] + t * (b["lon"] - a["lon"])
+
+            ref_lat = (lat + z["lat"]) / 2.0
+            x, y = to_local_miles(lat, lon, ref_lat)
+            cx, cy = to_local_miles(z["lat"], z["lon"], ref_lat)
+
+            dist_to_center = math.hypot(x - cx, y - cy)
+            r = scaled_hazard_radius_miles(z["radius_miles"]) * SOFT_BUFFER_FACTOR
+
+            sample_penalty = 0.0
+
+            if dist_to_center < r:
+                if z["hazard_type"] == "weather":
+                    sample_penalty = 0.45 * flight_time_min
+                else:
+                    sample_penalty = 0.2 * flight_time_min
+
+            elif dist_to_center < r * 1.2:
+                proximity = (r * 1.2 - dist_to_center) / (r * 0.2)
+                proximity = max(0.0, min(1.0, proximity))
+
+                if z["hazard_type"] == "weather":
+                    sample_penalty = proximity * 0.2 * flight_time_min
+                else:
+                    sample_penalty = proximity * 0.1 * flight_time_min
+
+            zone_penalty = max(zone_penalty, sample_penalty)
+
+        extra += zone_penalty
+
+    return min(extra, 1.5 * flight_time_min)
 
 def can_connect(a: dict, b: dict, hard_zones: List[dict], max_edge_miles: float) -> bool:
     dist = distance_between(a, b)
@@ -139,7 +182,44 @@ def can_connect(a: dict, b: dict, hard_zones: List[dict], max_edge_miles: float)
             return False
     return True
 
-def build_field_graph(target_time_iso: str) -> Dict[str, List[dict]]:
+def simplify_polyline_with_hard_and_soft_zones(polyline, hard_zones, soft_zones):
+    if len(polyline) <= 2:
+        return polyline
+
+    simplified = [polyline[0]]
+    i = 0
+
+    while i < len(polyline) - 1:
+        best_j = i + 1
+
+        for j in range(len(polyline) - 1, i, -1):
+            a = {"lat": polyline[i][0], "lon": polyline[i][1]}
+            b = {"lat": polyline[j][0], "lon": polyline[j][1]}
+
+            blocked = False
+            for z in hard_zones:
+                if edge_intersects_point_pair(a["lat"], a["lon"], b["lat"], b["lon"], z):
+                    blocked = True
+                    break
+            if blocked:
+                continue
+
+            # Do not allow simplification to create a shortcut that cuts deeply through soft zones
+            seg_dist = distance_between(a, b)
+            seg_time_min = (seg_dist / EFFECTIVE_AIRSPEED_MPH) * 60.0
+            soft_penalty = soft_penalty_minutes_for_edge(a, b, soft_zones, seg_time_min)
+            if soft_penalty > 6.0:
+                continue
+
+            best_j = j
+            break
+
+        simplified.append(polyline[best_j])
+        i = best_j
+
+    return simplified
+
+def build_field_graph(target_time_iso: str):
     weather_zones = build_weather_hazard_zones(target_time_iso)
     hard_zones = all_hard_zones(weather_zones)
     soft_zones = all_soft_zones(weather_zones)
@@ -150,6 +230,7 @@ def build_field_graph(target_time_iso: str) -> Dict[str, List[dict]]:
         for k, v in NODES.items()
     ]
     all_points = airports + field_points
+    point_lookup = {p["id"]: p for p in all_points}
 
     graph: Dict[str, List[dict]] = {p["id"]: [] for p in all_points}
 
@@ -168,21 +249,39 @@ def build_field_graph(target_time_iso: str) -> Dict[str, List[dict]]:
                 continue
 
             dist = distance_between(a, b)
-            cost = dist + soft_cost_for_edge(a, b, soft_zones)
+            flight_time_min = (dist / EFFECTIVE_AIRSPEED_MPH) * 60.0
+            cost = flight_time_min + soft_penalty_minutes_for_edge(a, b, soft_zones, flight_time_min)
 
-            graph[a["id"]].append({"to": b["id"], "distance_miles": dist, "cost": cost})
-            graph[b["id"]].append({"to": a["id"], "distance_miles": dist, "cost": cost})
+            graph[a["id"]].append({
+                "from": a["id"],
+                "to": b["id"],
+                "distance_miles": dist,
+                "flight_time_min": flight_time_min,   # 👈 ADD THIS LINE
+                "cost": cost,
+                "route_class": "field",
+                "hazards": [],
+            })
 
-    return graph
+            graph[b["id"]].append({
+                "from": b["id"],
+                "to": a["id"],
+                "distance_miles": dist,
+                "flight_time_min": flight_time_min,   # 👈 ADD THIS LINE
+                "cost": cost,
+                "route_class": "field",
+                "hazards": [],
+            })
 
-def shortest_path_field(start: str, end: str, departure_time_iso: Optional[str] = None) -> Optional[dict]:
-    if departure_time_iso is None:
-        departure_time_iso = datetime.now().replace(second=0, microsecond=0).isoformat(timespec="minutes")
+    return graph, point_lookup
 
-    graph = build_field_graph(departure_time_iso)
-    if start not in graph or end not in graph:
-        return None
-
+def _run_field_search(
+    graph,
+    point_lookup,
+    start: str,
+    end: str,
+    departure_time_iso: str,
+    allow_airport_transfers: bool,
+) -> Optional[dict]:
     pq = [(0.0, start, [start], [])]
     best: Dict[str, float] = {}
 
@@ -195,25 +294,123 @@ def shortest_path_field(start: str, end: str, departure_time_iso: Optional[str] 
 
         if current == end:
             total_distance = sum(e["distance_miles"] for e in path_edges)
-            total_minutes = (total_distance / CRUISE_SPEED_MPH) * 60.0
+            total_minutes = 0.0
+            legs = []
+            cumulative_minutes = 0.0
+
+            for edge in path_edges:
+                leg_minutes = edge["flight_time_min"]
+                cumulative_minutes += leg_minutes
+
+                leg = {
+                    "from": edge["from"],
+                    "to": edge["to"],
+                    "distance_miles": round(edge["distance_miles"], 2),
+                    "route_class": edge.get("route_class", "field"),
+                    "eta": add_minutes_iso(departure_time_iso, cumulative_minutes),
+                    "hazards": edge.get("hazards", []),
+                }
+                legs.append(leg)
+
+            raw_polyline = [
+                [point_lookup[node_id]["lat"], point_lookup[node_id]["lon"]]
+                for node_id in path_nodes
+            ]
+
+            weather_zones = build_weather_hazard_zones(departure_time_iso)
+            hard_zones = all_hard_zones(weather_zones)
+            soft_zones = all_soft_zones(weather_zones)
+
+            polyline = simplify_polyline_with_hard_and_soft_zones(
+                raw_polyline,
+                hard_zones,
+                soft_zones,
+            )
+
             return {
                 "path": path_nodes,
-                "edges": path_edges,
+                "polyline": polyline,
+                "raw_polyline": raw_polyline,
+                "legs": legs,
                 "departure_time": departure_time_iso,
-                "arrival_time": add_minutes_iso(departure_time_iso, total_minutes),
+                "arrival_time": add_minutes_iso(departure_time_iso, cumulative_minutes),
                 "total_distance_miles": round(total_distance, 2),
                 "total_cost": round(total_cost, 2),
-                "num_legs": len(path_edges),
-                "total_time_minutes": round(total_minutes, 1),
+                "num_legs": len(legs),
+                "total_time_minutes": round(cumulative_minutes, 1),
             }
 
         for edge in graph[current]:
             nxt = edge["to"]
             if nxt in path_nodes:
                 continue
+
+            # Do not allow intermediate airport swaps in the first pass
+            if nxt in NODES and nxt not in {start, end} and not allow_airport_transfers:
+                continue
+
+            extra_cost = edge["cost"]
+
+            if nxt in NODES and nxt not in {start, end}:
+                if not allow_airport_transfers:
+                    continue
+                extra_cost += TRANSFER_TIME_MIN
+
+            turn_penalty = 0.0
+            if path_edges:
+                prev = path_edges[-1]
+
+                a1 = point_lookup[prev["from"]]
+                a2 = point_lookup[prev["to"]]
+                b2 = point_lookup[edge["to"]]
+
+                v1x = a2["lon"] - a1["lon"]
+                v1y = a2["lat"] - a1["lat"]
+                v2x = b2["lon"] - a2["lon"]
+                v2y = b2["lat"] - a2["lat"]
+
+                mag1 = math.hypot(v1x, v1y)
+                mag2 = math.hypot(v2x, v2y)
+
+                if mag1 > 0 and mag2 > 0:
+                    cos_theta = (v1x * v2x + v1y * v2y) / (mag1 * mag2)
+                    cos_theta = max(-1.0, min(1.0, cos_theta))
+                    angle_deg = math.degrees(math.acos(cos_theta))
+
+                    if angle_deg > 45:
+                        turn_penalty = 0.05
+                    if angle_deg > 90:
+                        turn_penalty = 0.15
+
             heapq.heappush(
                 pq,
-                (total_cost + edge["cost"], nxt, path_nodes + [nxt], path_edges + [edge])
+                (
+                    total_cost + extra_cost + turn_penalty,
+                    nxt,
+                    path_nodes + [nxt],
+                    path_edges + [edge],
+                )
             )
-
     return None
+
+def shortest_path_field(start: str, end: str, departure_time_iso: Optional[str] = None) -> Optional[dict]:
+    if departure_time_iso is None:
+        departure_time_iso = datetime.now().replace(second=0, microsecond=0).isoformat(timespec="minutes")
+
+    graph, point_lookup = build_field_graph(departure_time_iso)
+    if start not in graph or end not in graph:
+        return None
+
+    # First try: no intermediate airport transfers
+    result = _run_field_search(
+        graph, point_lookup, start, end, departure_time_iso,
+        allow_airport_transfers=False
+    )
+    if result is not None:
+        return result
+
+    # Fallback: allow transfers if direct field routing fails
+    return _run_field_search(
+        graph, point_lookup, start, end, departure_time_iso,
+        allow_airport_transfers=True
+    )

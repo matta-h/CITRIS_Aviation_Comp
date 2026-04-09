@@ -1,10 +1,11 @@
 import time
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from backend.routing import NODES, build_graph, shortest_path, NO_FLY_ZONES, SLOW_ZONES
+from backend.routing_single import NODES, NO_FLY_ZONES, SLOW_ZONES
+from backend.routing import shortest_path_field as shortest_path
 from backend.weather_history import fetch_weather_for_nodes
-from backend.sim_time import SimulationClock, parse_iso_utc
-from datetime import datetime, timedelta
+#from backend.sim_time import SimulationClock, parse_iso_utc
+from datetime import datetime
 from backend.weather_grid import (
     get_cached_weather_grid,
     start_preload_weather_day,
@@ -42,7 +43,7 @@ def get_route(start: str, end: str, departure_time: str | None = None):
     if departure_time is None:
         departure_time = datetime.now().isoformat(timespec="minutes")
 
-    result = shortest_path(start, end, departure_time_iso=departure_time, clock=None)
+    result = shortest_path(start, end, departure_time_iso=departure_time)
 
     if result is None:
         raise HTTPException(status_code=404, detail="No feasible route found")

@@ -23,6 +23,7 @@ function routeColor(routeClass) {
   if (routeClass === "yellow") return "gold";
   if (routeClass === "orange") return "orange";
   if (routeClass === "detour") return "deepskyblue";
+  if (routeClass === "field") return "blue"; // or green, your choice
   return "red";
 }
 
@@ -192,7 +193,7 @@ function App() {
         setError(err.message || "Failed to fetch route.");
         setIsRouting(false);
       });
-  }, [selectedStart, selectedEnd, gridTime]);
+  }, [selectedStart, selectedEnd, requestedGridTime]);
 
   useEffect(() => {
     if (!showWeatherGrid || !requestedGridTime) {
@@ -455,8 +456,35 @@ function App() {
               </div>
             );
           })}
+          {routeData?.raw_polyline && routeData.raw_polyline.length > 1 && (
+            <Polyline
+              positions={routeData.raw_polyline}
+              pathOptions={{
+                color: "gray",
+                weight: 2,
+                opacity: 0.75,
+                dashArray: "6,8",
+              }}
+            />
+          )}
+          {routeData?.polyline && routeData.polyline.length > 1 && (
+            <Polyline
+              positions={routeData.polyline}
+              pathOptions={{
+                color: "blue",
+                weight: 5,
+                opacity: 0.5,
+              }}
+            >
+              <Popup>
+                <b>Field Route</b>
+                <br />
+                Continuous path (field-based routing)
+              </Popup>
+            </Polyline>
+          )}
 
-          {routeSegments.map((segment, idx) => (
+{/*           {routeSegments.map((segment, idx) => (
             <Polyline
               key={idx}
               positions={segment.positions}
@@ -477,7 +505,7 @@ function App() {
                 Detour points: {segment.viaCount}
               </Popup>
             </Polyline>
-          ))}
+          ))} */}
         </MapContainer>
       </div>
 
