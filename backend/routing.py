@@ -1,636 +1,219 @@
 from __future__ import annotations
 
-import requests
 import math
 import heapq
-from backend.weather_history import fetch_weather_for_nodes, weather_penalty
-from backend.weather import add_minutes_iso
-from typing import Dict, List, Optional, Tuple
 from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
-# -------------------------------------------------
-# Finalized real-world nodes
-# capacity = simultaneous operating pads for now
-# parking = optional future storage count
-# -------------------------------------------------
-NODES: Dict[str, dict] = {
-    "UCB": {
-        "name": "UC Berkeley",
-        "lat": 37.875158,
-        "lon": -122.261472,
-        "type": "uc",
-        "capacity": 1,
-        "parking": 1,
-    },
-    "UCD": {
-        "name": "UC Davis",
-        "lat": 38.539703,
-        "lon": -121.758061,
-        "type": "uc",
-        "capacity": 1,
-        "parking": 1,
-    },
-    "UCSC": {
-        "name": "UC Santa Cruz",
-        "lat": 36.999100,
-        "lon": -122.063486,
-        "type": "uc",
-        "capacity": 1,
-        "parking": 1,
-    },
-    "UCM": {
-        "name": "UC Merced",
-        "lat": 37.369886,
-        "lon": -120.415594,
-        "type": "uc",
-        "capacity": 1,
-        "parking": 1,
-    },
-    "KSQL": {
-        "name": "San Carlos Airport",
-        "lat": 37.512517,
-        "lon": -122.248736,
-        "type": "airport",
-        "capacity": 2,
-        "parking": 4,
-    },
-    "KNUQ": {
-        "name": "Moffett Federal Airfield",
-        "lat": 37.407217,
-        "lon": -122.048822,
-        "type": "airport",
-        "capacity": 3,
-        "parking": 6,
-    },
-    "KLVK": {
-        "name": "Livermore Municipal Airport",
-        "lat": 37.694697,
-        "lon": -121.829808,
-        "type": "airport",
-        "capacity": 4,
-        "parking": 8,
-    },
-    "KCVH": {
-        "name": "Hollister Municipal Airport",
-        "lat": 36.891033,
-        "lon": -121.403344,
-        "type": "airport",
-        "capacity": 3,
-        "parking": 6,
-    },
-    "KSNS": {
-        "name": "Salinas Municipal Airport",
-        "lat": 36.665964,
-        "lon": -121.610133,
-        "type": "airport",
-        "capacity": 3,
-        "parking": 6,
-    },
-    "KOAR": {
-        "name": "Marina Municipal Airport",
-        "lat": 36.677764,
-        "lon": -121.758731,
-        "type": "airport",
-        "capacity": 2,
-        "parking": 4,
-    },
-}
+from backend.weather_history import fetch_weather_for_nodes
+from backend.weather_grid import get_cached_weather_grid
+from backend.weather import add_minutes_iso
+from backend.routing import (
+    NODES,
+    NO_FLY_ZONES,
+    SLOW_ZONES,
+    MAX_LEG_MILES,
+    CRUISE_SPEED_MPH,
+    HAZARD_SETTINGS,
+    scaled_hazard_radius_miles,
+    distance_between,
+    to_local_miles,
+    point_to_segment_distance_miles,
+)
 
-# -------------------------------------------------
-# Routing assumptions
-# -------------------------------------------------
-SHORT_HOP_THRESHOLD = 15.0
-SHORT_HOP_PENALTY = 4.0
+FIELD_STEP_MILES = 8.0
+FIELD_NEIGHBOR_RADIUS_MILES = 16.0
+AIRPORT_CONNECT_RADIUS_MILES = 20.0
 
-MAX_LEG_MILES = 85.0
+def build_weather_hazard_zones(target_time_iso: str) -> List[dict]:
+    grid = get_cached_weather_grid(target_time_iso)
+    zones: List[dict] = []
+    for point in grid:
+        wx = point.get("weather", {})
+        status = wx.get("status")
+        if status not in ("caution", "unsafe"):
+            continue
+        zones.append({
+            "name": f"Weather {status}",
+            "lat": point["lat"],
+            "lon": point["lon"],
+            "radius_miles": 7.0,
+            "mode": status,
+            "hazard_type": "weather",
+        })
+    return zones
 
-RISK_WEIGHTS = {
-    "green": 1.00,
-    "yellow": 1.10,
-    "orange": 1.20,
-}
+def map_bounds_from_nodes(buffer_deg: float = 0.35) -> Tuple[float, float, float, float]:
+    lats = [n["lat"] for n in NODES.values()]
+    lons = [n["lon"] for n in NODES.values()]
+    return (
+        min(lats) - buffer_deg,
+        max(lats) + buffer_deg,
+        min(lons) - buffer_deg,
+        max(lons) + buffer_deg,
+    )
 
-# Penalize each connection so fewer-stop routes are preferred
-STOP_PENALTY = 20
+def miles_per_degree(ref_lat: float) -> Tuple[float, float]:
+    return 69.0, 69.0 * math.cos(math.radians(ref_lat))
 
-# -------------------------------------------------
-# Static obstacle zones
-# radius in miles
-# -------------------------------------------------
-NO_FLY_ZONES = [
-    {
-        "name": "SF Bay Core Avoidance",
-        "lat": 37.68,
-        "lon": -122.22,
-        "radius_miles": 10.0,
-        "mode": "hard",
-        "hazard_type": "airspace",
-    },
-    {
-        "name": "Monterey Bay Avoidance",
-        "lat": 36.92,
-        "lon": -121.95,
-        "radius_miles": 8.0,
-        "mode": "hard",
-        "hazard_type": "water_safety",
-    },
-]
-
-SLOW_ZONES = [
-    {
-        "name": "Diablo Corridor Caution",
-        "lat": 37.55,
-        "lon": -121.85,
-        "radius_miles": 12.0,
-        "penalty": 18.0,
-        "mode": "soft",
-        "hazard_type": "terrain",
-    },
-    {
-        "name": "South Bay Caution",
-        "lat": 37.35,
-        "lon": -121.95,
-        "radius_miles": 10.0,
-        "penalty": 12.0,
-        "mode": "soft",
-        "hazard_type": "airspace_congestion",
-    },
-]
-
-def to_local_miles(lat: float, lon: float, ref_lat: float) -> Tuple[float, float]:
-    """
-    Convert lat/lon to approximate local Cartesian miles.
-    Good enough for regional obstacle checks.
-    """
-    miles_per_deg_lat = 69.0
-    miles_per_deg_lon = 69.0 * math.cos(math.radians(ref_lat))
-    x = lon * miles_per_deg_lon
-    y = lat * miles_per_deg_lat
-    return x, y
-
-
-def point_to_segment_distance_miles(
-    px: float, py: float,
-    x1: float, y1: float,
-    x2: float, y2: float
-) -> float:
-    dx = x2 - x1
-    dy = y2 - y1
-
-    if dx == 0 and dy == 0:
-        return math.hypot(px - x1, py - y1)
-
-    t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
-    t = max(0.0, min(1.0, t))
-
-    closest_x = x1 + t * dx
-    closest_y = y1 + t * dy
-    return math.hypot(px - closest_x, py - closest_y)
-
-
-def edge_intersects_circle(node_a: dict, node_b: dict, zone: dict) -> bool:
-    ref_lat = (node_a["lat"] + node_b["lat"] + zone["lat"]) / 3.0
-
-    x1, y1 = to_local_miles(node_a["lat"], node_a["lon"], ref_lat)
-    x2, y2 = to_local_miles(node_b["lat"], node_b["lon"], ref_lat)
-    px, py = to_local_miles(zone["lat"], zone["lon"], ref_lat)
-
-    d = point_to_segment_distance_miles(px, py, x1, y1, x2, y2)
-    return d <= zone["radius_miles"]
-
-
-def no_fly_hit(node_a: dict, node_b: dict) -> Optional[dict]:
-    for zone in NO_FLY_ZONES:
-        if edge_intersects_circle(node_a, node_b, zone):
-            return zone
-    return None
-
-
-def slow_zone_penalty(node_a: dict, node_b: dict) -> float:
-    total = 0.0
-    for zone in SLOW_ZONES:
-        if edge_intersects_circle(node_a, node_b, zone):
-            total += zone["penalty"]
-    return total
-
-def slow_zone_hits(node_a: dict, node_b: dict) -> List[dict]:
-    hits = []
-    for zone in SLOW_ZONES:
-        if edge_intersects_circle(node_a, node_b, zone):
-            hits.append(zone)
-    return hits
-
-# -------------------------------------------------
-# Manual edge classes for now
-# -------------------------------------------------
-GREEN_EDGES = {
-    tuple(sorted(("UCSC", "KOAR"))),
-    tuple(sorted(("UCSC", "KSNS"))),
-    tuple(sorted(("UCSC", "KCVH"))),
-    tuple(sorted(("KOAR", "KSNS"))),
-    tuple(sorted(("KOAR", "KCVH"))),
-    tuple(sorted(("KSNS", "KCVH"))),
-}
-
-YELLOW_EDGES = {
-    tuple(sorted(("UCB", "UCD"))),
-    tuple(sorted(("UCB", "KLVK"))),
-    tuple(sorted(("UCD", "KLVK"))),
-    tuple(sorted(("KLVK", "UCM"))),
-    tuple(sorted(("KLVK", "KCVH"))),
-    tuple(sorted(("KCVH", "UCM"))),
-    tuple(sorted(("UCB", "KSQL"))),
-    tuple(sorted(("KLVK", "KNUQ"))),
-    tuple(sorted(("KSQL", "KNUQ"))),
-}
-
-ORANGE_EDGES = {
-    tuple(sorted(("UCB", "KNUQ"))),
-    tuple(sorted(("KSQL", "UCSC"))),
-    tuple(sorted(("KNUQ", "UCSC"))),
-    tuple(sorted(("KNUQ", "KCVH"))),
-    tuple(sorted(("KSQL", "KLVK"))),
-}
-
-def edge_key(a: str, b: str) -> Tuple[str, str]:
-    return tuple(sorted((a, b)))
-
-def route_class(a: str, b: str) -> Optional[str]:
-    key = edge_key(a, b)
-    if key in GREEN_EDGES:
-        return "green"
-    if key in YELLOW_EDGES:
-        return "yellow"
-    if key in ORANGE_EDGES:
-        return "orange"
-    return None
-
-# -------------------------------------------------
-# Real geographic distance
-# -------------------------------------------------
-def haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    r_miles = 3958.7613
-
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-
-    a = math.sin(dphi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
-    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
-    return r_miles * c
-
-def distance_between(node_a: dict, node_b: dict) -> float:
-    return haversine_miles(node_a["lat"], node_a["lon"], node_b["lat"], node_b["lon"])
-
-# -------------------------------------------------
-# Detour routing
-# -------------------------------------------------
-def generate_detour_nodes(a: dict, b: dict, zone: dict):
-    """
-    Generate two possible smooth arc detours around a circular no-fly zone.
-    Returns a list of candidate waypoint lists.
-    """
-
-    ref_lat = (a["lat"] + b["lat"] + zone["lat"]) / 3.0
-
-    ax, ay = to_local_miles(a["lat"], a["lon"], ref_lat)
-    bx, by = to_local_miles(b["lat"], b["lon"], ref_lat)
+def point_in_circle(lat: float, lon: float, zone: dict) -> bool:
+    ref_lat = (lat + zone["lat"]) / 2.0
+    x, y = to_local_miles(lat, lon, ref_lat)
     cx, cy = to_local_miles(zone["lat"], zone["lon"], ref_lat)
+    r = scaled_hazard_radius_miles(zone["radius_miles"])
+    return math.hypot(x - cx, y - cy) <= r
 
-    r = zone["radius_miles"] * 1.15  # buffer outside no-fly circle
-    miles_per_deg_lat = 69.0
-    miles_per_deg_lon = 69.0 * math.cos(math.radians(ref_lat))
+def edge_hits_circle(a: dict, b: dict, zone: dict) -> bool:
+    return edge_intersects_point_pair(a["lat"], a["lon"], b["lat"], b["lon"], zone)
 
-    def local_to_latlon(x: float, y: float) -> dict:
-        return {
-            "lat": y / miles_per_deg_lat,
-            "lon": x / miles_per_deg_lon,
-        }
+def edge_intersects_point_pair(lat1: float, lon1: float, lat2: float, lon2: float, zone: dict) -> bool:
+    ref_lat = (lat1 + lat2 + zone["lat"]) / 3.0
+    x1, y1 = to_local_miles(lat1, lon1, ref_lat)
+    x2, y2 = to_local_miles(lat2, lon2, ref_lat)
+    px, py = to_local_miles(zone["lat"], zone["lon"], ref_lat)
+    d = point_to_segment_distance_miles(px, py, x1, y1, x2, y2)
+    r = scaled_hazard_radius_miles(zone["radius_miles"])
+    return d <= r
 
-    def normalize_angle(theta: float) -> float:
-        while theta <= -math.pi:
-            theta += 2 * math.pi
-        while theta > math.pi:
-            theta -= 2 * math.pi
-        return theta
+def all_hard_zones(weather_zones: List[dict]) -> List[dict]:
+    hard = list(NO_FLY_ZONES)
+    for z in weather_zones:
+        if z["mode"] == "unsafe":
+            hard.append(z)
+    return hard
 
-    angle_a = math.atan2(ay - cy, ax - cx)
-    angle_b = math.atan2(by - cy, bx - cx)
+def all_soft_zones(weather_zones: List[dict]) -> List[dict]:
+    soft = list(SLOW_ZONES)
+    for z in weather_zones:
+        if z["mode"] == "caution":
+            soft.append(z)
+    return soft
 
-    candidates = []
+def build_field_points(target_time_iso: str) -> List[dict]:
+    lat_min, lat_max, lon_min, lon_max = map_bounds_from_nodes()
+    ref_lat = (lat_min + lat_max) / 2.0
+    mpd_lat, mpd_lon = miles_per_degree(ref_lat)
 
-    # direction = +1 means counterclockwise, -1 clockwise
-    for direction in [1, -1]:
-        start_angle = angle_a
-        end_angle = angle_b
+    lat_step = FIELD_STEP_MILES / mpd_lat
+    lon_step = FIELD_STEP_MILES / mpd_lon
 
-        delta = normalize_angle(end_angle - start_angle)
+    weather_zones = build_weather_hazard_zones(target_time_iso)
+    hard_zones = all_hard_zones(weather_zones)
 
-        if direction == 1 and delta < 0:
-            delta += 2 * math.pi
-        elif direction == -1 and delta > 0:
-            delta -= 2 * math.pi
+    points: List[dict] = []
+    lat = lat_min
+    pid = 0
+    while lat <= lat_max:
+        lon = lon_min
+        while lon <= lon_max:
+            blocked = any(point_in_circle(lat, lon, z) for z in hard_zones)
+            if not blocked:
+                points.append({
+                    "id": f"F{pid}",
+                    "lat": lat,
+                    "lon": lon,
+                    "type": "field",
+                })
+                pid += 1
+            lon += lon_step
+        lat += lat_step
 
-        steps = 8  # increase for smoother arcs
-        arc_points = []
+    return points
 
-        for i in range(1, steps):
-            t = i / steps
-            theta = start_angle + delta * t
-            px = cx + r * math.cos(theta)
-            py = cy + r * math.sin(theta)
-            arc_points.append(local_to_latlon(px, py))
+def soft_cost_for_edge(a: dict, b: dict, soft_zones: List[dict]) -> float:
+    extra = 0.0
+    for z in soft_zones:
+        if edge_hits_circle(a, b, z):
+            if z["hazard_type"] == "weather":
+                extra += HAZARD_SETTINGS["caution_penalty"]
+            else:
+                extra += z.get("penalty", 10.0)
+    return extra
 
-        candidates.append(arc_points)
+def can_connect(a: dict, b: dict, hard_zones: List[dict], max_edge_miles: float) -> bool:
+    dist = distance_between(a, b)
+    if dist > max_edge_miles:
+        return False
+    for z in hard_zones:
+        if edge_hits_circle(a, b, z):
+            return False
+    return True
 
-    return candidates
+def build_field_graph(target_time_iso: str) -> Dict[str, List[dict]]:
+    weather_zones = build_weather_hazard_zones(target_time_iso)
+    hard_zones = all_hard_zones(weather_zones)
+    soft_zones = all_soft_zones(weather_zones)
 
-# -------------------------------------------------
-# Graph construction
-# -------------------------------------------------
-def classify_edge(a: str, b: str, dist: float) -> str:
-    """
-    Temporary classification until obstacle/weather layers are added.
-    For now, direct edges are allowed if within range.
-    """
-    # You can refine this later with terrain/water/airspace checks.
-    if dist <= 40:
-        return "green"
-    if dist <= 65:
-        return "yellow"
-    return "orange"
+    field_points = build_field_points(target_time_iso)
+    airports = [
+        {"id": k, "lat": v["lat"], "lon": v["lon"], "type": "airport"}
+        for k, v in NODES.items()
+    ]
+    all_points = airports + field_points
 
-UNSAFE_WEATHER_PENALTY = 0.0
-def build_graph(clock=None) -> Dict[str, List[dict]]:
-    graph: Dict[str, List[dict]] = {node_id: [] for node_id in NODES}
+    graph: Dict[str, List[dict]] = {p["id"]: [] for p in all_points}
 
-    if clock:
-        current_time_iso = clock.current_time.isoformat(timespec="minutes")
-        weather_data = fetch_weather_for_nodes(NODES, current_time_iso)
-    else:
-        weather_data = fetch_weather_for_nodes(NODES)
+    for i in range(len(all_points)):
+        for j in range(i + 1, len(all_points)):
+            a = all_points[i]
+            b = all_points[j]
 
-    node_ids = list(NODES.keys())
-    for i in range(len(node_ids)):
-        for j in range(i + 1, len(node_ids)):
-            a = node_ids[i]
-            b = node_ids[j]
+            max_edge = FIELD_NEIGHBOR_RADIUS_MILES
+            if a["type"] == "airport" or b["type"] == "airport":
+                max_edge = AIRPORT_CONNECT_RADIUS_MILES
+            if a["type"] == "airport" and b["type"] == "airport":
+                max_edge = MAX_LEG_MILES
 
-            dist = distance_between(NODES[a], NODES[b])
-
-            if dist > MAX_LEG_MILES:
+            if not can_connect(a, b, hard_zones, max_edge):
                 continue
 
-            rclass = classify_edge(a, b, dist)
-            hit_zone = no_fly_hit(NODES[a], NODES[b])
+            dist = distance_between(a, b)
+            cost = dist + soft_cost_for_edge(a, b, soft_zones)
 
-            if hit_zone is not None:
-                detour_paths = generate_detour_nodes(NODES[a], NODES[b], hit_zone)
+            graph[a["id"]].append({"to": b["id"], "distance_miles": dist, "cost": cost})
+            graph[b["id"]].append({"to": a["id"], "distance_miles": dist, "cost": cost})
 
-                for via_points in detour_paths:
-                    route_points = [NODES[a], *via_points, NODES[b]]
-
-                    total_dist = 0.0
-                    valid = True
-
-                    for k in range(len(route_points) - 1):
-                        seg_start = route_points[k]
-                        seg_end = route_points[k + 1]
-
-                        # Do not allow any sub-segment to cut back through the no-fly zone
-                        if no_fly_hit(seg_start, seg_end) is not None:
-                            valid = False
-                            break
-
-                        total_dist += distance_between(seg_start, seg_end)
-
-                    if not valid:
-                        continue
-
-                    if total_dist > MAX_LEG_MILES * 1.6:
-                        continue
-
-                    wx_a = weather_data.get(a, {})
-                    wx_b = weather_data.get(b, {})
-
-                    penalty_a = weather_penalty(wx_a)
-                    penalty_b = weather_penalty(wx_b)
-
-                    if penalty_a == float("inf"):
-                        penalty_a = UNSAFE_WEATHER_PENALTY
-                    if penalty_b == float("inf"):
-                        penalty_b = UNSAFE_WEATHER_PENALTY
-
-                    weather_cost = penalty_a + penalty_b
-                    cost = total_dist * 1.25 + weather_cost
-
-                    graph[a].append({
-                        "to": b,
-                        "distance_miles": total_dist,
-                        "route_class": "detour",
-                        "cost": cost,
-                        "via": via_points,
-                        "hazards": [
-                            {
-                                "name": hit_zone["name"],
-                                "type": hit_zone["hazard_type"],
-                                "mode": hit_zone["mode"],
-                            }
-                        ],
-                    })
-
-                    graph[b].append({
-                        "to": a,
-                        "distance_miles": total_dist,
-                        "route_class": "detour",
-                        "cost": cost,
-                        "via": list(reversed(via_points)),
-                        "hazards": [
-                            {
-                                "name": hit_zone["name"],
-                                "type": hit_zone["hazard_type"],
-                                "mode": hit_zone["mode"],
-                            }
-                        ],
-                    })
-                continue
-
-            short_hop_penalty = SHORT_HOP_PENALTY if dist < SHORT_HOP_THRESHOLD else 0.0
-            slow_hits = slow_zone_hits(NODES[a], NODES[b])
-            obstacle_penalty = sum(zone["penalty"] for zone in slow_hits)
-
-            wx_a = weather_data.get(a, {})
-            wx_b = weather_data.get(b, {})
-
-            penalty_a = weather_penalty(wx_a)
-            penalty_b = weather_penalty(wx_b)
-
-            if penalty_a == float("inf") or penalty_b == float("inf"):
-                continue
-
-            weather_cost = penalty_a + penalty_b
-
-            cost = (
-                dist * RISK_WEIGHTS[rclass]
-                + short_hop_penalty
-                + obstacle_penalty
-                + weather_cost
-            )
-
-            graph[a].append({
-                "to": b,
-                "distance_miles": dist,
-                "route_class": rclass,
-                "cost": cost,
-                "hazards": [
-                    {
-                        "name": z["name"],
-                        "type": z["hazard_type"],
-                        "mode": z["mode"],
-                        "penalty": z["penalty"],
-                    }
-                    for z in slow_hits
-                ],
-            })
-            graph[b].append({
-                "to": a,
-                "distance_miles": dist,
-                "route_class": rclass,
-                "cost": cost,
-                "hazards": [
-                    {
-                        "name": z["name"],
-                        "type": z["hazard_type"],
-                        "mode": z["mode"],
-                        "penalty": z["penalty"],
-                    }
-                    for z in slow_hits
-                ],
-            })
     return graph
 
-# -------------------------------------------------
-# Shortest path
-# -------------------------------------------------
-CRUISE_SPEED_MPH = 120.0
-
-from itertools import count
-
-def bucket_minutes(value: float, step: int = 15) -> int:
-    return int(step * round(value / step))
-
-def shortest_path(start: str,
-    end: str,
-    departure_time_iso: str | None = None,
-    clock=None,
-) -> Optional[dict]:
-    graph = build_graph(clock)
-
-    if start not in graph or end not in graph:
-        return None
-
+def shortest_path_field(start: str, end: str, departure_time_iso: Optional[str] = None) -> Optional[dict]:
     if departure_time_iso is None:
         departure_time_iso = datetime.now().replace(second=0, microsecond=0).isoformat(timespec="minutes")
 
-    counter = count()
+    graph = build_field_graph(departure_time_iso)
+    if start not in graph or end not in graph:
+        return None
 
-    pq = [
-        (0.0, next(counter), start, 0.0, [start], [])
-    ]
-
-    best_cost = {}
+    pq = [(0.0, start, [start], [])]
+    best: Dict[str, float] = {}
 
     while pq:
-        total_cost, _, current, elapsed_minutes, path_nodes, path_edges = heapq.heappop(pq)
+        total_cost, current, path_nodes, path_edges = heapq.heappop(pq)
 
-        state_key = (current, bucket_minutes(elapsed_minutes, 15))
-        if state_key in best_cost and best_cost[state_key] <= total_cost:
+        if current in best and best[current] <= total_cost:
             continue
-        best_cost[state_key] = total_cost
+        best[current] = total_cost
 
         if current == end:
-            legs = []
-            total_distance = 0.0
-            cumulative_minutes = 0.0
-
-            for i, edge in enumerate(path_edges):
-                a = path_nodes[i]
-                b = path_nodes[i + 1]
-
-                leg_minutes = (edge["distance_miles"] / CRUISE_SPEED_MPH) * 60.0
-                cumulative_minutes += leg_minutes
-                eta_iso = add_minutes_iso(departure_time_iso, cumulative_minutes)
-
-                leg = {
-                    "from": a,
-                    "to": b,
-                    "distance_miles": round(edge["distance_miles"], 2),
-                    "route_class": edge["route_class"],
-                    "eta": eta_iso,
-                    "hazards": edge.get("hazards", []),
-                }
-
-                if "via" in edge:
-                    leg["via"] = edge["via"]
-
-                legs.append(leg)
-                total_distance += edge["distance_miles"]
-
+            total_distance = sum(e["distance_miles"] for e in path_edges)
+            total_minutes = (total_distance / CRUISE_SPEED_MPH) * 60.0
             return {
                 "path": path_nodes,
-                "legs": legs,
+                "edges": path_edges,
                 "departure_time": departure_time_iso,
-                "arrival_time": add_minutes_iso(departure_time_iso, cumulative_minutes),
+                "arrival_time": add_minutes_iso(departure_time_iso, total_minutes),
                 "total_distance_miles": round(total_distance, 2),
                 "total_cost": round(total_cost, 2),
                 "num_legs": len(path_edges),
-                "total_time_minutes": round(cumulative_minutes, 1),
+                "total_time_minutes": round(total_minutes, 1),
             }
 
         for edge in graph[current]:
-            neighbor = edge["to"]
-
-            leg_minutes = (edge["distance_miles"] / CRUISE_SPEED_MPH) * 60.0
-            arrival_minutes = elapsed_minutes + leg_minutes
-            eta_iso = add_minutes_iso(departure_time_iso, arrival_minutes)
-            # Step 1 optimization: use only the graph weather that was
-            # loaded once at the simulation time. Do not re-query weather
-            # for every candidate neighbor/ETA yet.
-            extra_cost = edge["cost"]
-
-            if current != start:
-                extra_cost += STOP_PENALTY
-
+            nxt = edge["to"]
+            if nxt in path_nodes:
+                continue
             heapq.heappush(
                 pq,
-                (
-                    total_cost + extra_cost,
-                    next(counter),
-                    neighbor,
-                    arrival_minutes,
-                    path_nodes + [neighbor],
-                    path_edges + [edge],
-                ),
+                (total_cost + edge["cost"], nxt, path_nodes + [nxt], path_edges + [edge])
             )
 
     return None
-
-if __name__ == "__main__":
-    graph = build_graph()
-    print("Feasible graph:")
-    print(f"MAX_LEG_MILES = {MAX_LEG_MILES}")
-    print(f"STOP_PENALTY = {STOP_PENALTY}")
-
-    for node_id, edges in graph.items():
-        print(f"\n{node_id}:")
-        for e in edges:
-            print(
-                f"  -> {e['to']}: "
-                f"{e['distance_miles']:.2f} mi, "
-                f"{e['route_class']}, "
-                f"cost={e['cost']:.2f}"
-            )
-
-    print("\nExample route UCB -> UCD")
-    print(shortest_path("UCB", "UCD"))

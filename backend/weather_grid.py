@@ -4,15 +4,18 @@ import numpy as np
 import requests
 from datetime import datetime
 from typing import Dict, List, Tuple
+import threading
+from datetime import datetime
 
 # -----------------------------
 # Bounding box
 # -----------------------------
-LAT_MIN = 36.5278
-LAT_MAX = 38.6897
-LON_MIN = -122.4115
-LON_MAX = -120.2656
-GRID_SPACING = 0.2
+LAT_MIN = 36.33625
+LAT_MAX = 38.88125
+LON_MIN = -122.6111
+LON_MAX = -120.0661
+LAT_SPACING = 0.2
+LON_SPACING = 0.252
 
 # -----------------------------
 # Thresholds
@@ -32,6 +35,42 @@ CAUTION_PRECIP_MM = 1.0
 HOURLY_GRID_CACHE: Dict[str, List[Dict]] = {}
 DAY_GRID_CACHE: Dict[str, Dict[str, List[Dict]]] = {}
 
+PRELOAD_STATUS = {
+    "is_running": False,
+    "date": None,
+    "completed_hours": 0,
+    "total_hours": 24,
+    "current_hour": None,
+    "percent": 0.0,
+    "status": "idle",
+    "error": None,
+    "logs": [],
+}
+
+PRELOAD_LOCK = threading.Lock()
+
+def append_log(message: str) -> None:
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    PRELOAD_STATUS["logs"].append(f"[{timestamp}] {message}")
+
+    # keep logs from growing forever
+    if len(PRELOAD_STATUS["logs"]) > 300:
+        PRELOAD_STATUS["logs"] = PRELOAD_STATUS["logs"][-300:]
+
+
+def get_preload_status() -> Dict:
+    with PRELOAD_LOCK:
+        return {
+            "is_running": PRELOAD_STATUS["is_running"],
+            "date": PRELOAD_STATUS["date"],
+            "completed_hours": PRELOAD_STATUS["completed_hours"],
+            "total_hours": PRELOAD_STATUS["total_hours"],
+            "current_hour": PRELOAD_STATUS["current_hour"],
+            "percent": PRELOAD_STATUS["percent"],
+            "status": PRELOAD_STATUS["status"],
+            "error": PRELOAD_STATUS["error"],
+            "logs": PRELOAD_STATUS["logs"],
+        }
 
 def weather_status(
     wind_mph: float,
@@ -61,8 +100,8 @@ def normalize_hour_iso(target_time_iso: str) -> str:
 
 
 def generate_grid_points() -> List[Dict]:
-    lat_points = np.arange(LAT_MIN, LAT_MAX + GRID_SPACING, GRID_SPACING)
-    lon_points = np.arange(LON_MIN, LON_MAX + GRID_SPACING, GRID_SPACING)
+    lat_points = np.arange(LAT_MIN, LAT_MAX + LAT_SPACING, LAT_SPACING)
+    lon_points = np.arange(LON_MIN, LON_MAX + LON_SPACING, LON_SPACING)
 
     grid = []
     for lat in lat_points:
@@ -154,26 +193,75 @@ def fetch_weather_grid_batched(target_time_iso: str) -> List[Dict]:
     HOURLY_GRID_CACHE[target_time_iso] = results
     return results
 
+def start_preload_weather_day(date_str: str) -> Dict:
+    with PRELOAD_LOCK:
+        if PRELOAD_STATUS["is_running"]:
+            return {
+                "status": "already_running",
+                "date": PRELOAD_STATUS["date"],
+            }
 
-def preload_weather_day(date_str: str) -> Dict:
-    if date_str in DAY_GRID_CACHE and len(DAY_GRID_CACHE[date_str]) == 24:
-        return {
-            "status": "already_cached",
-            "date": date_str,
-            "hours_loaded": 24,
-        }
-
-    DAY_GRID_CACHE[date_str] = {}
-
-    for hour in range(24):
-        timestamp = f"{date_str}T{hour:02d}:00"
-        DAY_GRID_CACHE[date_str][timestamp] = fetch_weather_grid_batched(timestamp)
+    thread = threading.Thread(
+        target=_preload_weather_day_worker,
+        args=(date_str,),
+        daemon=True,
+    )
+    thread.start()
 
     return {
-        "status": "cached",
+        "status": "started",
         "date": date_str,
-        "hours_loaded": 24,
     }
+
+def _preload_weather_day_worker(date_str: str) -> None:
+    try:
+        with PRELOAD_LOCK:
+            PRELOAD_STATUS["is_running"] = True
+            PRELOAD_STATUS["date"] = date_str
+            PRELOAD_STATUS["completed_hours"] = 0
+            PRELOAD_STATUS["total_hours"] = 24
+            PRELOAD_STATUS["current_hour"] = None
+            PRELOAD_STATUS["percent"] = 0.0
+            PRELOAD_STATUS["status"] = "running"
+            PRELOAD_STATUS["error"] = None
+            PRELOAD_STATUS["logs"] = []
+
+        append_log(f"Started preload for {date_str}")
+
+        if date_str not in DAY_GRID_CACHE:
+            DAY_GRID_CACHE[date_str] = {}
+
+        for hour in range(24):
+            timestamp = f"{date_str}T{hour:02d}:00"
+
+            with PRELOAD_LOCK:
+                PRELOAD_STATUS["current_hour"] = timestamp
+            append_log(f"Loading {timestamp}")
+
+            DAY_GRID_CACHE[date_str][timestamp] = fetch_weather_grid_batched(timestamp)
+
+            with PRELOAD_LOCK:
+                PRELOAD_STATUS["completed_hours"] = hour + 1
+                PRELOAD_STATUS["percent"] = round(((hour + 1) / 24) * 100.0, 1)
+
+            append_log(f"Loaded {timestamp}")
+
+        with PRELOAD_LOCK:
+            PRELOAD_STATUS["is_running"] = False
+            PRELOAD_STATUS["status"] = "complete"
+            PRELOAD_STATUS["current_hour"] = None
+            PRELOAD_STATUS["percent"] = 100.0
+
+        append_log(f"Preload complete for {date_str}")
+
+    except Exception as exc:
+        with PRELOAD_LOCK:
+            PRELOAD_STATUS["is_running"] = False
+            PRELOAD_STATUS["status"] = "error"
+            PRELOAD_STATUS["error"] = str(exc)
+            PRELOAD_STATUS["current_hour"] = None
+
+        append_log(f"ERROR: {exc}")
 
 
 def get_cached_weather_grid(target_time_iso: str) -> List[Dict]:

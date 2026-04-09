@@ -1,12 +1,15 @@
-import datetime
 import time
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from backend.routing_old import NODES, build_graph, shortest_path, NO_FLY_ZONES, SLOW_ZONES
+from backend.routing import NODES, build_graph, shortest_path, NO_FLY_ZONES, SLOW_ZONES
 from backend.weather_history import fetch_weather_for_nodes
-from backend.weather_grid import get_cached_weather_grid, preload_weather_day
 from backend.sim_time import SimulationClock, parse_iso_utc
-from datetime import timedelta
+from datetime import datetime, timedelta
+from backend.weather_grid import (
+    get_cached_weather_grid,
+    start_preload_weather_day,
+    get_preload_status,
+)
 
 WEATHER_CACHE = {}
 WEATHER_LAST_FETCH = 0
@@ -39,16 +42,7 @@ def get_route(start: str, end: str, departure_time: str | None = None):
     if departure_time is None:
         departure_time = datetime.now().isoformat(timespec="minutes")
 
-    sim_time = parse_iso_utc(departure_time)
-
-    # Create simulation clock (Step 1)
-    clock = SimulationClock(
-        start_time=sim_time,
-        end_time=sim_time + timedelta(minutes=60),
-        step=timedelta(minutes=5),
-    )
-
-    result = shortest_path(start, end, departure_time, clock)
+    result = shortest_path(start, end, departure_time_iso=departure_time, clock=None)
 
     if result is None:
         raise HTTPException(status_code=404, detail="No feasible route found")
@@ -80,4 +74,9 @@ def get_weather(target_time: str | None = None):
 
 @app.post("/weather-grid-day-preload")
 def weather_grid_day_preload(date: str):
-    return preload_weather_day(date)
+    return start_preload_weather_day(date)
+
+
+@app.get("/weather-grid-day-preload-status")
+def weather_grid_day_preload_status():
+    return get_preload_status()

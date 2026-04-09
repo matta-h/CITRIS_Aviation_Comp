@@ -7,10 +7,12 @@ import {
   Polyline,
   CircleMarker,
   Circle,
+  Polygon
 } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import "leaflet-defaulticon-compatibility";
 import "leaflet-defaulticon-compatibility/dist/leaflet-defaulticon-compatibility.css";
+import { point, featureCollection, buffer, union } from "@turf/turf";
 
 function milesToMeters(miles) {
   return miles * 1609.34;
@@ -54,6 +56,53 @@ function gridCellRadiusMeters() {
   return 16000; // about 10 miles
 }
 
+function buildHazardPolygons(points) {
+  const unsafePoints = points.filter((p) => p.weather?.status === "unsafe");
+
+  if (unsafePoints.length === 0) return [];
+
+  // Each grid point represents a local area, not just a single exact point.
+  // Your grid spacing is about 0.2 degrees, so using about half that spacing
+  // as the radius gives each hazard point an area of influence.
+  const radiusKm = 11; // ~6.8 miles, roughly half the grid spacing
+
+  const bufferedFeatures = unsafePoints.map((p) => {
+    const pt = point([p.lon, p.lat]);
+    return buffer(pt, radiusKm, { units: "kilometers" });
+  });
+
+  if (bufferedFeatures.length === 0) return [];
+
+  let merged = bufferedFeatures[0];
+
+  for (let i = 1; i < bufferedFeatures.length; i++) {
+    try {
+      const mergedResult = union(featureCollection([merged, bufferedFeatures[i]]));
+      if (mergedResult) {
+        merged = mergedResult;
+      }
+    } catch (err) {
+      console.warn("Union failed for hazard polygon merge:", err);
+    }
+  }
+
+  if (!merged || !merged.geometry) return [];
+
+  if (merged.geometry.type === "Polygon") {
+    return [
+      merged.geometry.coordinates[0].map(([lon, lat]) => [lat, lon])
+    ];
+  }
+
+  if (merged.geometry.type === "MultiPolygon") {
+    return merged.geometry.coordinates.map((poly) =>
+      poly[0].map(([lon, lat]) => [lat, lon])
+    );
+  }
+
+  return [];
+}
+
 function App() {
   const [nodes, setNodes] = useState([]);
   const [selectedStart, setSelectedStart] = useState(null);
@@ -68,7 +117,8 @@ function App() {
   });
   const [weatherGrid, setWeatherGrid] = useState([]);
   const [gridTime, setGridTime] = useState("2024-01-15T08:00");
-  const [showWeatherGrid, setShowWeatherGrid] = useState(true);
+  const [requestedGridTime, setRequestedGridTime] = useState(null);
+  const [showWeatherGrid] = useState(true);
   const [showHazardRegions, setShowHazardRegions] = useState(false);
   const [showGridPoints, setShowGridPoints] = useState(true);
 
@@ -119,8 +169,9 @@ function App() {
       return;
     }
 
-    const url = `http://127.0.0.1:8000/route?start=${selectedStart}&end=${selectedEnd}`;
-
+    const effectiveRouteTime = requestedGridTime ?? gridTime;
+    const url = `http://127.0.0.1:8000/route?start=${selectedStart}&end=${selectedEnd}&departure_time=${encodeURIComponent(effectiveRouteTime)}`;
+    
     setIsRouting(true);
     setError("");
 
@@ -141,16 +192,20 @@ function App() {
         setError(err.message || "Failed to fetch route.");
         setIsRouting(false);
       });
-  }, [selectedStart, selectedEnd]);
+  }, [selectedStart, selectedEnd, gridTime]);
 
   useEffect(() => {
-    if (!showWeatherGrid || !gridTime) {
-      setWeatherGrid([]);
+    if (!showWeatherGrid || !requestedGridTime) {
       return;
     }
 
-    fetch(`http://127.0.0.1:8000/weather-grid?target_time=${encodeURIComponent(gridTime)}`)
-      .then((res) => res.json())
+    fetch(`http://127.0.0.1:8000/weather-grid?target_time=${encodeURIComponent(requestedGridTime)}`)
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error("Weather fetch failed");
+        }
+        return res.json();
+      })
       .then((data) => {
         setWeatherGrid(Array.isArray(data) ? data : []);
       })
@@ -158,7 +213,7 @@ function App() {
         console.warn("Failed to load weather grid.");
         setWeatherGrid([]);
       });
-  }, [gridTime, showWeatherGrid]);
+  }, [requestedGridTime, showWeatherGrid]);
 
   const nodeMap = useMemo(() => {
     const map = {};
@@ -320,46 +375,26 @@ function App() {
               );
             })}
 
-          {showHazardRegions &&
-            weatherGrid
-              .filter((point) => {
-                const status = point.weather?.status;
-                return status === "caution" || status === "unsafe";
-              })
-              .map((point, idx) => {
-                const wx = point.weather || {};
-                const fill = hazardFillColor(wx.status);
-
-                return (
-                  <Circle
-                    key={`hazard-${idx}`}
-                    center={[point.lat, point.lon]}
-                    radius={gridCellRadiusMeters()}
-                    pathOptions={{
-                      color: fill,
-                      fillColor: fill,
-                      fillOpacity: wx.status === "unsafe" ? 0.28 : 0.18,
-                      weight: 1,
-                    }}
-                  >
-                    <Popup>
-                      <b>Hazard Region</b>
-                      <br />
-                      Status: {wx.status ?? "unknown"}
-                      <br />
-                      Time: {wx.forecast_time ?? "N/A"}
-                      <br />
-                      Wind: {wx.wind_speed_mph ?? "N/A"} mph
-                      <br />
-                      Gusts: {wx.wind_gusts_mph ?? "N/A"} mph
-                      <br />
-                      Precip: {wx.precipitation_mm ?? "N/A"} mm
-                    </Popup>
-                  </Circle>
-                );
-              })}
-
-          {nodes.map((node) => {
+          {showHazardRegions && 
+            buildHazardPolygons(weatherGrid).map((poly, idx) => (
+              <Polygon
+                key={`hazard-poly-${idx}`}
+                positions={poly}
+                pathOptions={{
+                  color: "red",
+                  fillColor: "red",
+                  fillOpacity: 0.12,
+                  weight: 2,
+                }}
+              >
+                <Popup>
+                  <b>Hazard Region</b>
+                  <br />
+                  Merged unsafe-weather influence region.
+                </Popup>
+              </Polygon>
+            ))}
+                    {nodes.map((node) => {
             const isStart = node.id === selectedStart;
             const isEnd = node.id === selectedEnd;
 
@@ -512,6 +547,23 @@ function App() {
               }}
             />
           </label>
+          <button
+            onClick={() => {
+            //  if (preloadStatus?.status !== "complete") {
+            //    alert("Please initialize simulation first.");
+            //    return;
+            //  }
+              setRequestedGridTime(gridTime);
+            }}
+            style={{
+              marginTop: "8px",
+              width: "100%",
+              padding: "8px",
+              fontWeight: "bold",
+            }}
+          >
+            Load Weather for This Time
+          </button>
         </div>
 
         <div style={{ marginBottom: "16px" }}>
