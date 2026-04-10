@@ -5,6 +5,9 @@ import heapq
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
+from backend.geometry import point_in_polygon
+from backend.airspace import load_airspace
+from backend.geometry import (segment_hits_zone)
 from backend.weather_grid import get_cached_weather_grid
 from backend.weather import add_minutes_iso
 from backend.routing_single import (
@@ -15,7 +18,6 @@ from backend.routing_single import (
     scaled_hazard_radius_miles,
     distance_between,
     to_local_miles,
-    point_to_segment_distance_miles,
 )
 
 FIELD_STEP_MILES = 2.5
@@ -28,24 +30,59 @@ SOFT_BUFFER_FACTOR = 0.90
 EFFECTIVE_AIRSPEED_MPH = 120.0
 TRANSFER_TIME_MIN = 30.0
 TIME_TIE_THRESHOLD_MIN = 5.0
+AIRSPACE_CACHE = load_airspace()
 
-def build_weather_hazard_zones(target_time_iso: str) -> List[dict]:
-    grid = get_cached_weather_grid(target_time_iso)
-    zones: List[dict] = []
+def point_in_zone(lat, lon, zone):
+    if zone.get("geometry", "circle") == "circle":
+        return point_in_circle(lat, lon, zone)
+    elif zone.get("geometry") == "polygon":
+        poly = zone["points"]
+        return point_in_polygon(lat, lon, poly)
+    return False
+
+def edge_hits_hard_zone(a: dict, b: dict, zone: dict) -> bool:
+    if zone.get("geometry", "circle") == "circle":
+        return segment_hits_zone(a, b, zone, radius_scale=HARD_BUFFER_FACTOR)
+    return segment_hits_zone(a, b, zone)
+
+def can_connect(a: dict, b: dict, hard_zones: list[dict], max_edge_miles: float) -> bool:
+    dist = distance_between(a, b)
+    if dist > max_edge_miles:
+        return False
+    return not any(edge_hits_hard_zone(a, b, z) for z in hard_zones)
+
+def build_weather_hazard_zones(target_time_iso: str) -> tuple[list[dict], list[dict]]:
+    grid = get_cached_weather_grid(target_time_iso) or []
+    hard = []
+    soft = []
+
     for point in grid:
         wx = point.get("weather", {})
         status = wx.get("status")
-        if status not in ("caution", "unsafe"):
-            continue
-        zones.append({
-            "name": f"Weather {status}",
-            "lat": point["lat"],
-            "lon": point["lon"],
-            "radius_miles": 7.0,
-            "mode": status,
-            "hazard_type": "weather",
-        })
-    return zones
+        if status == "unsafe":
+            hard.append({
+                "name": "Unsafe weather",
+                "geometry": "circle",
+                "lat": point["lat"],
+                "lon": point["lon"],
+                "radius_miles": 9.0,
+                "mode": "hard",
+                "hazard_type": "weather",
+            })
+        elif status == "caution":
+            soft.append({
+                "name": "Caution weather",
+                "geometry": "circle",
+                "lat": point["lat"],
+                "lon": point["lon"],
+                "radius_miles": 7.0,
+                "mode": "soft",
+                "hazard_type": "weather",
+                "penalty": 10.0,
+            })
+
+    return hard, soft
+
 
 def map_bounds_from_nodes(buffer_deg: float = 0.35) -> Tuple[float, float, float, float]:
     lats = [n["lat"] for n in NODES.values()]
@@ -67,32 +104,6 @@ def point_in_circle(lat: float, lon: float, zone: dict) -> bool:
     r = scaled_hazard_radius_miles(zone["radius_miles"]) * HARD_BUFFER_FACTOR
     return math.hypot(x - cx, y - cy) <= r
 
-def edge_hits_circle(a: dict, b: dict, zone: dict) -> bool:
-    return edge_intersects_point_pair(a["lat"], a["lon"], b["lat"], b["lon"], zone)
-
-def edge_intersects_point_pair(lat1: float, lon1: float, lat2: float, lon2: float, zone: dict) -> bool:
-    ref_lat = (lat1 + lat2 + zone["lat"]) / 3.0
-    x1, y1 = to_local_miles(lat1, lon1, ref_lat)
-    x2, y2 = to_local_miles(lat2, lon2, ref_lat)
-    px, py = to_local_miles(zone["lat"], zone["lon"], ref_lat)
-    d = point_to_segment_distance_miles(px, py, x1, y1, x2, y2)
-    r = scaled_hazard_radius_miles(zone["radius_miles"]) * HARD_BUFFER_FACTOR
-    return d <= r
-
-def all_hard_zones(weather_zones: List[dict]) -> List[dict]:
-    hard = list(NO_FLY_ZONES)
-    for z in weather_zones:
-        if z["mode"] == "unsafe":
-            hard.append(z)
-    return hard
-
-def all_soft_zones(weather_zones: List[dict]) -> List[dict]:
-    soft = list(SLOW_ZONES)
-    for z in weather_zones:
-        if z["mode"] == "caution":
-            soft.append(z)
-    return soft
-
 def build_field_points(target_time_iso: str) -> List[dict]:
     lat_min, lat_max, lon_min, lon_max = map_bounds_from_nodes()
     ref_lat = (lat_min + lat_max) / 2.0
@@ -101,8 +112,9 @@ def build_field_points(target_time_iso: str) -> List[dict]:
     lat_step = FIELD_STEP_MILES / mpd_lat
     lon_step = FIELD_STEP_MILES / mpd_lon
 
-    weather_zones = build_weather_hazard_zones(target_time_iso)
-    hard_zones = all_hard_zones(weather_zones)
+    weather_hard, weather_soft = build_weather_hazard_zones(target_time_iso)
+    airspace = AIRSPACE_CACHE
+    hard_zones = list(NO_FLY_ZONES) + weather_hard + airspace 
 
     points: List[dict] = []
     lat = lat_min
@@ -110,7 +122,7 @@ def build_field_points(target_time_iso: str) -> List[dict]:
     while lat <= lat_max:
         lon = lon_min
         while lon <= lon_max:
-            blocked = any(point_in_circle(lat, lon, z) for z in hard_zones)
+            blocked = any(point_in_zone(lat, lon, z) for z in hard_zones)
             if not blocked:
                 points.append({
                     "id": f"F{pid}",
@@ -170,15 +182,6 @@ def soft_penalty_minutes_for_edge(
 
     return min(extra, 1.5 * flight_time_min)
 
-def can_connect(a: dict, b: dict, hard_zones: List[dict], max_edge_miles: float) -> bool:
-    dist = distance_between(a, b)
-    if dist > max_edge_miles:
-        return False
-    for z in hard_zones:
-        if edge_hits_circle(a, b, z):
-            return False
-    return True
-
 def simplify_polyline_with_hard_and_soft_zones(polyline, hard_zones, soft_zones):
     if len(polyline) <= 2:
         return polyline
@@ -195,7 +198,7 @@ def simplify_polyline_with_hard_and_soft_zones(polyline, hard_zones, soft_zones)
 
             blocked = False
             for z in hard_zones:
-                if edge_intersects_point_pair(a["lat"], a["lon"], b["lat"], b["lon"], z):
+                if edge_hits_hard_zone(a, b, z):
                     blocked = True
                     break
             if blocked:
@@ -217,9 +220,11 @@ def simplify_polyline_with_hard_and_soft_zones(polyline, hard_zones, soft_zones)
     return simplified
 
 def build_field_graph(target_time_iso: str):
-    weather_zones = build_weather_hazard_zones(target_time_iso)
-    hard_zones = all_hard_zones(weather_zones)
-    soft_zones = all_soft_zones(weather_zones)
+    weather_hard, weather_soft = build_weather_hazard_zones(target_time_iso)
+    airspace = AIRSPACE_CACHE
+
+    hard_zones = list(NO_FLY_ZONES) + weather_hard + airspace
+    soft_zones = list(SLOW_ZONES) + weather_soft
 
     field_points = build_field_points(target_time_iso)
     airports = [
@@ -253,7 +258,7 @@ def build_field_graph(target_time_iso: str):
                 "from": a["id"],
                 "to": b["id"],
                 "distance_miles": dist,
-                "flight_time_min": flight_time_min,
+                "flight_time_min": flight_time_min,   # 👈 ADD THIS LINE
                 "cost": cost,
                 "route_class": "field",
                 "hazards": [],
@@ -263,7 +268,7 @@ def build_field_graph(target_time_iso: str):
                 "from": b["id"],
                 "to": a["id"],
                 "distance_miles": dist,
-                "flight_time_min": flight_time_min,
+                "flight_time_min": flight_time_min,   # 👈 ADD THIS LINE
                 "cost": cost,
                 "route_class": "field",
                 "hazards": [],
@@ -314,9 +319,11 @@ def _run_field_search(
                 for node_id in path_nodes
             ]
 
-            weather_zones = build_weather_hazard_zones(departure_time_iso)
-            hard_zones = all_hard_zones(weather_zones)
-            soft_zones = all_soft_zones(weather_zones)
+            weather_hard, weather_soft = build_weather_hazard_zones(departure_time_iso)
+            airspace = AIRSPACE_CACHE
+
+            hard_zones = list(NO_FLY_ZONES) + weather_hard + airspace
+            soft_zones = list(SLOW_ZONES) + weather_soft
 
             polyline = simplify_polyline_with_hard_and_soft_zones(
                 raw_polyline,
