@@ -14,6 +14,8 @@ from backend.weather_grid import (
 from backend.airspace_adapter import build_frontend_airspace_overlays
 from backend.airspace_adapter import get_airspace_geojson_for_frontend
 from backend.terrain_feasibility import evaluate_terrain_for_polyline
+from backend.airspace import load_airspace
+from backend.routing import build_weather_hazard_zones
 
 
 WEATHER_CACHE = {}
@@ -43,18 +45,24 @@ def get_route(start: str, end: str, departure_time: str | None = None):
     if departure_time is None:
         departure_time = datetime.now().isoformat(timespec="minutes")
 
-    result = plan_mission(start, end, departure_time)
+    result = shortest_path(start, end, departure_time_iso=departure_time)
 
     if result is None:
-        raise HTTPException(status_code=404, detail="No feasible mission found")
+        raise HTTPException(status_code=404, detail="No feasible route found")
 
-    return result
+    return {"route": result}
 
 @app.get("/obstacles")
-def get_obstacles():
+def get_obstacles(target_time: str | None = None):
+    weather_hard, weather_soft = build_weather_hazard_zones(
+        target_time or datetime.now().isoformat(timespec="minutes")
+    )
     return {
         "no_fly_zones": NO_FLY_ZONES,
         "slow_zones": SLOW_ZONES,
+        "airspace_zones": load_airspace(),
+        "weather_hard": weather_hard,
+        "weather_soft": weather_soft,
     }
 
 @app.post("/terrain-check")
