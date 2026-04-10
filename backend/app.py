@@ -2,7 +2,7 @@ import time
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from backend.routing_single import NODES, NO_FLY_ZONES, SLOW_ZONES
-from backend.routing import shortest_path_field as shortest_path
+from backend.mission_planner import plan_mission
 from backend.weather_history import fetch_weather_for_nodes
 #from backend.sim_time import SimulationClock, parse_iso_utc
 from datetime import datetime
@@ -11,6 +11,9 @@ from backend.weather_grid import (
     start_preload_weather_day,
     get_preload_status,
 )
+from backend.airspace_adapter import build_frontend_airspace_overlays
+from backend.airspace_adapter import get_airspace_geojson_for_frontend
+
 
 WEATHER_CACHE = {}
 WEATHER_LAST_FETCH = 0
@@ -30,10 +33,6 @@ app.add_middleware(
 def get_nodes():
     return NODES
 
-@app.get("/graph")
-def get_graph():
-    return build_graph()
-
 @app.get("/weather-grid")
 def get_weather_grid(target_time: str):
     return get_cached_weather_grid(target_time)
@@ -43,10 +42,10 @@ def get_route(start: str, end: str, departure_time: str | None = None):
     if departure_time is None:
         departure_time = datetime.now().isoformat(timespec="minutes")
 
-    result = shortest_path(start, end, departure_time_iso=departure_time)
+    result = plan_mission(start, end, departure_time)
 
     if result is None:
-        raise HTTPException(status_code=404, detail="No feasible route found")
+        raise HTTPException(status_code=404, detail="No feasible mission found")
 
     return result
 
@@ -56,6 +55,18 @@ def get_obstacles():
         "no_fly_zones": NO_FLY_ZONES,
         "slow_zones": SLOW_ZONES,
     }
+
+@app.get("/airspace-geojson")
+def get_airspace_geojson():
+    bounds = (-124.0, 35.5, -119.0, 39.5)
+    return get_airspace_geojson_for_frontend(bounds, {"B", "C", "D", "G"})
+
+@app.get("/airspace-overlays")
+def get_airspace_overlays():
+    bounds = (-124.0, 35.5, -119.0, 39.5)
+    overlays = build_frontend_airspace_overlays(bounds)
+    print(f"[AIRSPACE OVERLAYS] returning {len(overlays)} overlays")
+    return overlays
 
 @app.get("/weather")
 def get_weather(target_time: str | None = None):

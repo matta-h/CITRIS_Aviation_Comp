@@ -104,7 +104,28 @@ function buildHazardPolygons(points) {
   return [];
 }
 
+function airspaceStyle(feature) {
+  const props = feature?.properties || {};
+  const text = `${props.level || ""} ${props.airspace_type || ""} ${props.type || ""}`.toUpperCase();
+
+  let color = "green";
+  if (text.includes("CLASS B") || text.trim() === "B") color = "red";
+  else if (text.includes("CLASS C") || text.trim() === "C") color = "orange";
+  else if (text.includes("CLASS D") || text.trim() === "D") color = "blue";
+  else if (text.includes("CLASS G") || text.trim() === "G") color = "green";
+
+  return {
+    color,
+    fillColor: color,
+    fillOpacity: 0.08,
+    weight: 2,
+  };
+}
+
 function App() {
+  const [airspaceGeojson, setAirspaceGeojson] = useState(null);
+  const [airspaceOverlays, setAirspaceOverlays] = useState([null]);
+  const [showAirspace, setShowAirspace] = useState(true);
   const [nodes, setNodes] = useState([]);
   const [selectedStart, setSelectedStart] = useState(null);
   const [selectedEnd, setSelectedEnd] = useState(null);
@@ -124,6 +145,16 @@ function App() {
   const [showGridPoints, setShowGridPoints] = useState(true);
 
   useEffect(() => {
+    fetch("http://127.0.0.1:8000/airspace-geojson")
+      .then((res) => res.json())
+      .then((data) => {
+        console.log("airspace-geojson:", data);
+        setAirspaceGeojson(data);
+      })
+      .catch(() => {
+        console.warn("Failed to load airspace geojson.");
+        setAirspaceGeojson(null);
+      });
     fetch("http://127.0.0.1:8000/obstacles")
       .then((res) => res.json())
       .then((data) => {
@@ -395,6 +426,60 @@ function App() {
                 </Popup>
               </Polygon>
             ))}
+            {showAirspace &&
+              airspaceGeojson?.features?.map((feature, idx) => {
+                const geom = feature.geometry;
+                const props = feature.properties || {};
+
+                const popupText = (
+                  <Popup>
+                    <b>{props.airspace_type || props.level || "Airspace"}</b>
+                    <br />
+                    Level: {props.level ?? "N/A"}
+                    <br />
+                    Lower: {props.lower_limit ?? "N/A"} {props.lower_limit_reference ?? ""}
+                    <br />
+                    Upper: {props.upper_limit ?? "N/A"} {props.upper_limit_reference ?? ""}
+                  </Popup>
+                );
+
+                if (geom.type === "Polygon") {
+                  const positions = geom.coordinates.map((ring) =>
+                    ring.map(([lon, lat]) => [lat, lon])
+                  );
+
+                  return (
+                    <Polygon
+                      key={`airspace-poly-${idx}`}
+                      positions={positions}
+                      pathOptions={airspaceStyle(feature)}
+                    >
+                      {popupText}
+                    </Polygon>
+                  );
+                }
+
+                if (geom.type === "MultiPolygon") {
+                  return geom.coordinates.map((poly, polyIdx) => {
+                    const positions = poly.map((ring) =>
+                      ring.map(([lon, lat]) => [lat, lon])
+                    );
+
+                    return (
+                      <Polygon
+                        key={`airspace-mpoly-${idx}-${polyIdx}`}
+                        positions={positions}
+                        pathOptions={airspaceStyle(feature)}
+                      >
+                        {popupText}
+                      </Polygon>
+                    );
+                  });
+                }
+
+                return null;
+              })}
+            
                     {nodes.map((node) => {
             const isStart = node.id === selectedStart;
             const isEnd = node.id === selectedEnd;
@@ -402,6 +487,8 @@ function App() {
             const wx = weather[node.id];
             const wxColor = weatherColor(wx?.status);
 
+
+            
             return (
               <div key={node.id}>
                 <Marker
@@ -574,6 +661,15 @@ function App() {
                 padding: "6px",
               }}
             />
+          </label>
+          <label style={{ display: "block", marginTop: "8px" }}>
+            <input
+              type="checkbox"
+              checked={showAirspace}
+              onChange={(e) => setShowAirspace(e.target.checked)}
+              style={{ marginRight: "8px" }}
+            />
+            Show airspace
           </label>
           <button
             onClick={() => {

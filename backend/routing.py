@@ -5,7 +5,6 @@ import heapq
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-from backend.weather_history import fetch_weather_for_nodes
 from backend.weather_grid import get_cached_weather_grid
 from backend.weather import add_minutes_iso
 from backend.routing_single import (
@@ -13,8 +12,6 @@ from backend.routing_single import (
     NO_FLY_ZONES,
     SLOW_ZONES,
     MAX_LEG_MILES,
-    CRUISE_SPEED_MPH,
-    HAZARD_SETTINGS,
     scaled_hazard_radius_miles,
     distance_between,
     to_local_miles,
@@ -256,7 +253,7 @@ def build_field_graph(target_time_iso: str):
                 "from": a["id"],
                 "to": b["id"],
                 "distance_miles": dist,
-                "flight_time_min": flight_time_min,   # 👈 ADD THIS LINE
+                "flight_time_min": flight_time_min,
                 "cost": cost,
                 "route_class": "field",
                 "hazards": [],
@@ -266,7 +263,7 @@ def build_field_graph(target_time_iso: str):
                 "from": b["id"],
                 "to": a["id"],
                 "distance_miles": dist,
-                "flight_time_min": flight_time_min,   # 👈 ADD THIS LINE
+                "flight_time_min": flight_time_min,
                 "cost": cost,
                 "route_class": "field",
                 "hazards": [],
