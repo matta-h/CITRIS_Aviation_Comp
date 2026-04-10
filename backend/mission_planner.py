@@ -19,6 +19,9 @@ DEFAULT_CRUISE_ALT_FT = 3500.0
 AIRSPACE_SOFT_PENALTY_MIN = 0.5
 CORRIDOR_PENALTY_PER_MILE_MIN = 1.5
 
+EARLY_ACCEPT_DIRECT_DISTANCE_MILES = 75.0
+EARLY_ACCEPT_DIRECT_SCORE_MIN = 45.0
+
 DEBUG_MISSION = True
 LEG_CACHE = {}
 
@@ -335,6 +338,18 @@ def candidate_exchange_nodes(start: str, end: str) -> List[str]:
     airport_ids = ["KSQL", "KLVK", "KCVH", "KSNS", "KOAR", "KNUQ"]
     return [node_id for node_id in airport_ids if node_id not in {start, end}]
 
+def _finalize_selected_candidate(best: dict, raw_direct_distance: float, cruise_alt_ft: float) -> dict:
+    best_route = best["route"]
+
+    return {
+        **best_route,
+        "selected_mission_type": best["mission_type"],
+        "exchange_required": best["exchange_required"],
+        "exchange_stops": best["stops"][1:-1],
+        "score": round(best["score"], 2),
+        "raw_direct_distance_miles": round(raw_direct_distance, 2),
+        "selected_cruise_alt_ft": cruise_alt_ft,
+    }
 
 def plan_mission(
     start: str,
@@ -350,6 +365,7 @@ def plan_mission(
 
     candidates: List[dict] = []
 
+    direct = None
     if raw_direct_distance < MAX_DIRECT_MISSION_MILES:
         direct = build_direct_candidate(
             start,
@@ -359,6 +375,22 @@ def plan_mission(
         )
         if direct:
             candidates.append(direct)
+
+            direct_dist = direct["route"]["total_distance_miles"]
+            direct_score = direct["score"]
+
+            # Early accept strong direct missions:
+            # safely under 85 miles and already much better than any realistic exchange mission.
+            if (
+                direct_dist <= EARLY_ACCEPT_DIRECT_DISTANCE_MILES
+                and direct_score <= EARLY_ACCEPT_DIRECT_SCORE_MIN
+            ):
+                dprint(
+                    f"[MISSION] early accept direct: "
+                    f"dist={direct_dist:.2f} score={direct_score:.2f}"
+                )
+                dprint(f"[MISSION] completed in {time.time() - t0:.2f}s")
+                return _finalize_selected_candidate(direct, raw_direct_distance, cruise_alt_ft)
 
     exchange_nodes = candidate_exchange_nodes(start, end)
     dprint(f"[MISSION] exchange candidates: {exchange_nodes}")
@@ -379,7 +411,6 @@ def plan_mission(
         return None
 
     best = min(candidates, key=lambda c: c["score"])
-    best_route = best["route"]
 
     dprint(
         f"[MISSION] best candidate type={best['mission_type']} "
@@ -387,12 +418,4 @@ def plan_mission(
     )
     dprint(f"[MISSION] completed in {time.time() - t0:.2f}s")
 
-    return {
-        **best_route,
-        "selected_mission_type": best["mission_type"],
-        "exchange_required": best["exchange_required"],
-        "exchange_stops": best["stops"][1:-1],
-        "score": round(best["score"], 2),
-        "raw_direct_distance_miles": round(raw_direct_distance, 2),
-        "selected_cruise_alt_ft": cruise_alt_ft,
-    }
+    return _finalize_selected_candidate(best, raw_direct_distance, cruise_alt_ft)
