@@ -189,7 +189,7 @@ function App() {
   const [gridTime, setGridTime] = useState("2024-01-15T08:00");
   const [requestedGridTime, setRequestedGridTime] = useState(null);
   const [showWeatherGrid] = useState(true);
-  const [showHazardRegions, setShowHazardRegions] = useState(false);
+  const [showHazardRegions, setShowHazardRegions] = useState(true);
   const [showGridPoints, setShowGridPoints] = useState(true);
   const [selectedType, setSelectedType] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null);
@@ -197,10 +197,44 @@ function App() {
   const [startHour, setStartHour] = useState(6);
   const [endHour, setEndHour] = useState(22);
   const [currentHour, setCurrentHour] = useState(8);
+  /*   const [usePreloadedWeather, setUsePreloadedWeather] = useState(false); */
+  const [isPreloading, setIsPreloading] = useState(false);
 
   const [showWeather, setShowWeather] = useState(true);
   const [showPopulation, setShowPopulation] = useState(false);
   const [showFlights, setShowFlights] = useState(true);
+  const handleInitialize = () => {
+    if (!selectedDate) return;
+
+    setIsPreloading(true);
+
+    fetch("http://127.0.0.1:8000/weather-grid-day-preload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        date: selectedDate,
+        start_hour: startHour,
+        end_hour: endHour,
+      }),
+    })
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error("Pre-cache failed");
+        }
+        return res.json();
+      })
+      .then(() => {
+        const initialIso = `${selectedDate}T${String(startHour).padStart(2, "0")}:00`;
+        setCurrentHour(startHour);
+        setRequestedGridTime(initialIso);
+      })
+      .catch((err) => {
+        console.warn("Preload failed", err);
+      })
+      .finally(() => {
+        setIsPreloading(false);
+      });
+  };
 
   useEffect(() => {
     // 🔥 set backend source first
@@ -292,6 +326,11 @@ function App() {
         setIsRouting(false);
       });
   }, [selectedStart, selectedEnd, requestedGridTime]);
+
+  useEffect(() => {
+    const iso = `${selectedDate}T${String(currentHour).padStart(2, "0")}:00`;
+    setRequestedGridTime(iso);
+  }, [currentHour, selectedDate]);
 
   useEffect(() => {
     const effectiveWeatherTime = requestedGridTime ?? gridTime;
@@ -404,7 +443,7 @@ function App() {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100%" }}>
       <div style={{ display: "flex", flex: 1 }}>
-        <div style={{ flex: 1 }}>
+        <div style={{ flex: 1, position: "relative" }}>
           <MapContainer
             center={[37.5, -121.5]}
             zoom={7}
@@ -722,6 +761,27 @@ function App() {
             </Polyline>
           ))} */}
           </MapContainer>
+
+          {isPreloading && (
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                background: "rgba(0,0,0,0.45)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                zIndex: 1000,
+                color: "white",
+                fontSize: "28px",
+                fontWeight: "bold",
+                letterSpacing: "0.5px",
+                pointerEvents: "all",
+              }}
+            >
+              Pre-caching data...
+            </div>
+          )}
         </div>
         <RightPanel
           selectedType={selectedType}
@@ -731,6 +791,8 @@ function App() {
         />
       </div>
       <BottomToolbar
+        initialize={handleInitialize}
+        isPreloading={isPreloading}
         selectedDate={selectedDate}
         setSelectedDate={setSelectedDate}
         startHour={startHour}
@@ -745,6 +807,8 @@ function App() {
         setShowPopulation={setShowPopulation}
         showFlights={showFlights}
         setShowFlights={setShowFlights}
+        showHazardRegions={showHazardRegions}
+        setShowHazardRegions={setShowHazardRegions}
       />
     </div>
   );

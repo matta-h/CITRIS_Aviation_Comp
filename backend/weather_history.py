@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 from datetime import datetime
 import requests
 
@@ -48,10 +48,63 @@ def weather_penalty(entry: dict) -> float:
 # -----------------------------
 # Time matching
 # -----------------------------
-def nearest_hour_index(times: list[str], target_iso: str) -> int:
-    target = datetime.fromisoformat(target_iso)
-    parsed = [datetime.fromisoformat(t) for t in times]
-    return min(range(len(parsed)), key=lambda i: abs((parsed[i] - target).total_seconds()))
+def hourly_time_strings_for_range(date_str: str, start_hour: int, end_hour: int) -> List[str]:
+    return [
+        f"{date_str}T{hour:02d}:00"
+        for hour in range(start_hour, end_hour + 1)
+    ]
+
+
+def fetch_historical_weather_day_for_node(node: dict, day_str: str) -> dict:
+    """
+    Fetch one full day of hourly weather for a node in a single API call.
+    """
+    url = (
+        "https://archive-api.open-meteo.com/v1/archive"
+        f"?latitude={node['lat']}"
+        f"&longitude={node['lon']}"
+        f"&start_date={day_str}"
+        f"&end_date={day_str}"
+        "&hourly=wind_speed_10m,wind_gusts_10m,visibility,precipitation"
+        "&wind_speed_unit=mph"
+        "&timezone=auto"
+    )
+
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+
+    data = r.json().get("hourly", {})
+    times = data.get("time", [])
+    winds = data.get("wind_speed_10m", [])
+    gusts = data.get("wind_gusts_10m", [])
+    vis = data.get("visibility", [])
+    precip = data.get("precipitation", [])
+
+    if not times:
+        raise ValueError("No historical weather data returned")
+
+    results = {}
+    for idx, iso_time in enumerate(times):
+        wind_raw = winds[idx] if idx < len(winds) else None
+        gust_raw = gusts[idx] if idx < len(gusts) else None
+        visibility_raw = vis[idx] if idx < len(vis) else None
+        precip_raw = precip[idx] if idx < len(precip) else None
+
+        wind = float(wind_raw) if wind_raw is not None else 0.0
+        gust = float(gust_raw) if gust_raw is not None else 0.0
+        visibility = float(visibility_raw) if visibility_raw is not None else 99999.0
+        precipitation = float(precip_raw) if precip_raw is not None else 0.0
+
+        results[iso_time] = {
+            "forecast_time": iso_time,
+            "wind_speed_mph": wind,
+            "wind_gusts_mph": gust,
+            "visibility_m": visibility,
+            "precipitation_mm": precipitation,
+            "status": weather_status(wind, gust, visibility, precipitation),
+        }
+
+    return results
 
 # -----------------------------
 # MAIN HISTORICAL FETCH
@@ -132,3 +185,57 @@ def fetch_weather_for_nodes(nodes: Dict[str, dict], target_time_iso: Optional[st
             }
 
     return results
+
+def precache_weather_for_range(
+    nodes: Dict[str, dict],
+    date_str: str,
+    start_hour: int,
+    end_hour: int,
+) -> Dict[str, object]:
+    """
+    Pre-cache hourly node weather for a selected date/time window.
+
+    Optimization:
+    - one API request per node per day
+    - fill WEATHER_CACHE for each requested hour
+    """
+    requested_times = hourly_time_strings_for_range(date_str, start_hour, end_hour)
+    populated = 0
+    skipped = 0
+    errors = []
+
+    for node_id, node in nodes.items():
+        missing_times = [
+            t for t in requested_times
+            if (node["name"], t) not in WEATHER_CACHE
+        ]
+
+        if not missing_times:
+            skipped += len(requested_times)
+            continue
+
+        try:
+            full_day = fetch_historical_weather_day_for_node(node, date_str)
+
+            for t in requested_times:
+                cache_key = (node["name"], t)
+                if cache_key in WEATHER_CACHE:
+                    skipped += 1
+                    continue
+
+                if t in full_day:
+                    WEATHER_CACHE[cache_key] = full_day[t]
+                    populated += 1
+
+        except Exception as exc:
+            errors.append(f"{node_id}: {exc}")
+
+    return {
+        "status": "ok",
+        "date": date_str,
+        "start_hour": start_hour,
+        "end_hour": end_hour,
+        "cached_entries": populated,
+        "skipped_entries": skipped,
+        "errors": errors,
+    }

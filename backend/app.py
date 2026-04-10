@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from backend.routing_single import NODES, NO_FLY_ZONES, SLOW_ZONES
 from backend.mission_planner import plan_mission
-from backend.weather_history import fetch_weather_for_nodes
+from backend.weather_history import fetch_weather_for_nodes, precache_weather_for_range
 #from backend.sim_time import SimulationClock, parse_iso_utc
 from datetime import datetime
 from backend.weather_grid import (
@@ -112,8 +112,21 @@ def get_weather(target_time: str | None = None):
     return WEATHER_CACHE
 
 @app.post("/weather-grid-day-preload")
-def weather_grid_day_preload(date: str):
-    return start_preload_weather_day(date)
+def weather_grid_day_preload(payload: dict):
+    date = payload.get("date")
+    start_hour = int(payload.get("start_hour", 6))
+    end_hour = int(payload.get("end_hour", 22))
+
+    if not date:
+        raise HTTPException(status_code=400, detail="Missing 'date'")
+
+    if start_hour < 0 or start_hour > 23 or end_hour < 0 or end_hour > 23:
+        raise HTTPException(status_code=400, detail="Hours must be between 0 and 23")
+
+    if end_hour < start_hour:
+        raise HTTPException(status_code=400, detail="end_hour must be >= start_hour")
+
+    return precache_weather_for_range(NODES, date, start_hour, end_hour)
 
 
 @app.get("/weather-grid-day-preload-status")
