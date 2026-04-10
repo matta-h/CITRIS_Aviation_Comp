@@ -73,8 +73,11 @@ def segment_intersects_polygon(a, b, zone, buffer_miles=0.0) -> bool:
     return False
 
 def segment_hits_zone(a, b, zone, radius_scale=1.0):
-    if zone["geometry"] == "circle":
+    geom = zone.get("geometry", "circle")
+
+    if geom == "circle":
         return segment_intersects_circle(a, b, zone, radius_scale=radius_scale)
-    elif zone["geometry"] == "polygon":
+    elif geom == "polygon":
         return segment_intersects_polygon(a, b, zone)
+
     return False

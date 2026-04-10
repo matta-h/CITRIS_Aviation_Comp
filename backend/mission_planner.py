@@ -176,8 +176,6 @@ def build_direct_candidate(
 ) -> Optional[dict]:
     dprint(f"[MISSION] trying direct {start}->{end}")
 
-    route = shortest_path_field(start, end, departure_time_iso)
-
     t_direct = time.time()
     route = shortest_path_field(start, end, departure_time_iso)
     dprint(f"[MISSION] direct solve {start}->{end} took {time.time() - t_direct:.2f}s")
@@ -239,17 +237,13 @@ def build_exchange_candidate(
     t_leg1 = time.time()
     leg1 = solve_leg_cached(start, exchange, departure_time_iso)
     dprint(f"[MISSION] leg1 solve {start}->{exchange} took {time.time() - t_leg1:.2f}s")
-
-    t_leg2 = time.time()
-    leg2 = solve_leg_cached(exchange, end, departure_time_iso)
-    dprint(f"[MISSION] leg2 solve {exchange}->{end} took {time.time() - t_leg2:.2f}s")
-
-    leg1 = shortest_path_field(start, exchange, departure_time_iso)
     if not leg1:
         dprint("[MISSION] exchange rejected: no first leg")
         return None
 
-    leg2 = shortest_path_field(exchange, end, departure_time_iso)
+    t_leg2 = time.time()
+    leg2 = solve_leg_cached(exchange, end, departure_time_iso)
+    dprint(f"[MISSION] leg2 solve {exchange}->{end} took {time.time() - t_leg2:.2f}s")
     if not leg2:
         dprint("[MISSION] exchange rejected: no second leg")
         return None

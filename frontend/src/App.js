@@ -124,7 +124,6 @@ function airspaceStyle(feature) {
 
 function App() {
   const [airspaceGeojson, setAirspaceGeojson] = useState(null);
-  const [airspaceOverlays, setAirspaceOverlays] = useState([null]);
   const [showAirspace, setShowAirspace] = useState(true);
   const [nodes, setNodes] = useState([]);
   const [selectedStart, setSelectedStart] = useState(null);
@@ -726,50 +725,64 @@ function App() {
           <div>
             <h3>Route Result</h3>
             <p>
-              <strong>Path:</strong> {routeData.path.join(" → ")}
+              <strong>Path:</strong>{" "}
+              {Array.isArray(routeData.path)
+                ? routeData.path.join(" → ")
+                : Array.isArray(routeData.stops)
+                  ? routeData.stops.join(" → ")
+                  : "N/A"}
             </p>
             <p>
-              <strong>Total Distance:</strong> {routeData.total_distance_miles} mi
+              <strong>Total Distance:</strong>{" "}
+              {routeData.total_distance_miles ?? routeData.total_distance ?? routeData.distance ?? "N/A"} mi
               <br />
-              <strong>Total Cost:</strong> {routeData.total_cost}
+              <strong>Total Cost:</strong>{" "}
+              {routeData.total_cost ?? routeData.score ?? routeData.cost ?? "N/A"}
               <br />
-              <strong>Legs:</strong> {routeData.num_legs}
+              <strong>Legs:</strong>{" "}
+              {routeData.num_legs
+                ?? routeData.leg_count
+                ?? (Array.isArray(routeData.legs) ? routeData.legs.length : "N/A")}
             </p>
 
             <h4>Legs</h4>
             <ul style={{ paddingLeft: "18px" }}>
-              {routeData.legs.map((leg, idx) => (
-                <li key={idx} style={{ marginBottom: "10px" }}>
-                  <strong>
-                    {leg.from} → {leg.to}
-                  </strong>
-                  <br />
-                  {leg.distance_miles} mi
-                  <br />
-                  <span style={{ color: routeColor(leg.route_class) }}>
-                    {leg.route_class}
-                  </span>
-                  {Array.isArray(leg.via) && leg.via.length > 0 && (
-                    <>
-                      <br />
-                      via {leg.via.length} detour point(s)
-                    </>
-                  )}
-                  {Array.isArray(leg.hazards) && leg.hazards.length > 0 && (
-                    <>
-                      <br />
-                      Hazards:
-                      <ul style={{ marginTop: "4px", paddingLeft: "18px" }}>
-                        {leg.hazards.map((hz, hzIdx) => (
-                          <li key={hzIdx}>
-                            {hz.name} ({hz.type}, {hz.mode})
-                          </li>
-                        ))}
-                      </ul>
-                    </>
-                  )}
-                </li>
-              ))}
+              {Array.isArray(routeData.legs) ? (
+                routeData.legs.map((leg, idx) => (
+                  <li key={idx} style={{ marginBottom: "10px" }}>
+                    <strong>
+                      {leg.from} → {leg.to}
+                    </strong>
+                    <br />
+                    {leg.distance_miles ?? "N/A"} mi
+                    <br />
+                    <span style={{ color: routeColor(leg.route_class) }}>
+                      {leg.route_class ?? "unknown"}
+                    </span>
+                    {Array.isArray(leg.via) && leg.via.length > 0 && (
+                      <>
+                        <br />
+                        via {leg.via.length} detour point(s)
+                      </>
+                    )}
+                    {Array.isArray(leg.hazards) && leg.hazards.length > 0 && (
+                      <>
+                        <br />
+                        Hazards:
+                        <ul style={{ marginTop: "4px", paddingLeft: "18px" }}>
+                          {leg.hazards.map((hz, hzIdx) => (
+                            <li key={hzIdx}>
+                              {hz.name} ({hz.type}, {hz.mode})
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                  </li>
+                ))
+              ) : (
+                <li>No leg details available.</li>
+              )}
             </ul>
           </div>
         )}

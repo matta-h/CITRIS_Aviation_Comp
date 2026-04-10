@@ -45,12 +45,12 @@ def get_route(start: str, end: str, departure_time: str | None = None):
     if departure_time is None:
         departure_time = datetime.now().isoformat(timespec="minutes")
 
-    result = shortest_path(start, end, departure_time_iso=departure_time)
+    result = plan_mission(start, end, departure_time)
 
     if result is None:
         raise HTTPException(status_code=404, detail="No feasible route found")
 
-    return {"route": result}
+    return result
 
 @app.get("/obstacles")
 def get_obstacles(target_time: str | None = None):
