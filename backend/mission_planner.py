@@ -8,16 +8,19 @@ from backend.routing_single import NODES, distance_between
 from backend.routing import shortest_path_field
 from backend.airspace_adapter import get_global_airspace, filter_constraints_by_bounds
 from backend.airspace_feasibility import evaluate_airspace_constraints_for_polyline
+from backend.terrain_feasibility import evaluate_terrain_for_polyline
 
 MAX_DIRECT_MISSION_MILES = 85.0
 EFFECTIVE_AIRSPEED_MPH = 120.0
 EXCHANGE_DELAY_MIN = 30.0
 
+TERRAIN_CLEARANCE_MARGIN_FT = 1000
 DEFAULT_CRUISE_ALT_FT = 3500.0
 AIRSPACE_SOFT_PENALTY_MIN = 0.5
 CORRIDOR_PENALTY_PER_MILE_MIN = 1.5
 
 DEBUG_MISSION = True
+LEG_CACHE = {}
 
 
 def dprint(msg: str) -> None:
@@ -35,6 +38,26 @@ def bounds_for_stops(stops: List[str], buffer_deg: float = 0.4) -> Tuple[float, 
     north = max(lats) + buffer_deg
     return (west, south, east, north)
 
+def apply_terrain_checks(
+    route: dict,
+    cruise_alt_ft: float = DEFAULT_CRUISE_ALT_FT,
+) -> Optional[dict]:
+    terrain_eval = evaluate_terrain_for_polyline(
+        route["polyline"],
+        cruise_alt_ft=cruise_alt_ft,
+        clearance_margin_ft=TERRAIN_CLEARANCE_MARGIN_FT,
+    )
+
+    if not terrain_eval["terrain_clearance_ok"]:
+        dprint(
+            f"[TERRAIN] rejected route: max_terrain_ft={terrain_eval['max_terrain_ft']} "
+            f"min_clearance_ft={terrain_eval['min_clearance_ft']}"
+        )
+        return None
+
+    updated = dict(route)
+    updated["terrain_feasibility"] = terrain_eval
+    return updated
 
 def point_to_segment_distance_miles(
     px: float,
@@ -55,6 +78,17 @@ def point_to_segment_distance_miles(
     proj_y = y1 + t * dy
     return math.hypot(px - proj_x, py - proj_y)
 
+def solve_leg_cached(start: str, end: str, departure_time_iso: str):
+    key = (start, end, departure_time_iso)
+    if key in LEG_CACHE:
+        dprint(f"[MISSION] leg cache hit {start}->{end}")
+        return LEG_CACHE[key]
+
+    t0 = time.time()
+    result = shortest_path_field(start, end, departure_time_iso)
+    dprint(f"[MISSION] leg solve {start}->{end} took {time.time() - t0:.2f}s")
+    LEG_CACHE[key] = result
+    return result
 
 def corridor_deviation_penalty_minutes(
     polyline: List[List[float]],
@@ -140,6 +174,11 @@ def build_direct_candidate(
     dprint(f"[MISSION] trying direct {start}->{end}")
 
     route = shortest_path_field(start, end, departure_time_iso)
+
+    t_direct = time.time()
+    route = shortest_path_field(start, end, departure_time_iso)
+    dprint(f"[MISSION] direct solve {start}->{end} took {time.time() - t_direct:.2f}s")
+    
     if not route:
         dprint("[MISSION] direct failed: no route")
         return None
@@ -193,6 +232,14 @@ def build_exchange_candidate(
     cruise_alt_ft: float = DEFAULT_CRUISE_ALT_FT,
 ) -> Optional[dict]:
     dprint(f"[MISSION] trying exchange {start}->{exchange}->{end}")
+
+    t_leg1 = time.time()
+    leg1 = solve_leg_cached(start, exchange, departure_time_iso)
+    dprint(f"[MISSION] leg1 solve {start}->{exchange} took {time.time() - t_leg1:.2f}s")
+
+    t_leg2 = time.time()
+    leg2 = solve_leg_cached(exchange, end, departure_time_iso)
+    dprint(f"[MISSION] leg2 solve {exchange}->{end} took {time.time() - t_leg2:.2f}s")
 
     leg1 = shortest_path_field(start, exchange, departure_time_iso)
     if not leg1:

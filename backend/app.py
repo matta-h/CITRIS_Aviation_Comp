@@ -13,6 +13,7 @@ from backend.weather_grid import (
 )
 from backend.airspace_adapter import build_frontend_airspace_overlays
 from backend.airspace_adapter import get_airspace_geojson_for_frontend
+from backend.terrain_feasibility import evaluate_terrain_for_polyline
 
 
 WEATHER_CACHE = {}
@@ -55,6 +56,12 @@ def get_obstacles():
         "no_fly_zones": NO_FLY_ZONES,
         "slow_zones": SLOW_ZONES,
     }
+
+@app.post("/terrain-check")
+def terrain_check(payload: dict):
+    polyline = payload.get("polyline", [])
+    cruise_alt_ft = float(payload.get("cruise_alt_ft", 3500.0))
+    return evaluate_terrain_for_polyline(polyline, cruise_alt_ft=cruise_alt_ft)
 
 @app.get("/airspace-geojson")
 def get_airspace_geojson():
