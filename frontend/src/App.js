@@ -13,6 +13,8 @@ import {
 import "leaflet/dist/leaflet.css";
 import "leaflet-defaulticon-compatibility";
 import "leaflet-defaulticon-compatibility/dist/leaflet-defaulticon-compatibility.css";
+import RightPanel from "./components/RightPanel";
+import BottomToolbar from "./components/BottomToolbar";
 import { point, featureCollection, buffer, union } from "@turf/turf";
 
 function milesToMeters(miles) {
@@ -189,9 +191,19 @@ function App() {
   const [showWeatherGrid] = useState(true);
   const [showHazardRegions, setShowHazardRegions] = useState(false);
   const [showGridPoints, setShowGridPoints] = useState(true);
+  const [selectedType, setSelectedType] = useState(null);
+  const [selectedNode, setSelectedNode] = useState(null);
+  const [selectedDate, setSelectedDate] = useState("2024-01-15");
+  const [startHour, setStartHour] = useState(6);
+  const [endHour, setEndHour] = useState(22);
+  const [currentHour, setCurrentHour] = useState(8);
+
+  const [showWeather, setShowWeather] = useState(true);
+  const [showPopulation, setShowPopulation] = useState(false);
+  const [showFlights, setShowFlights] = useState(true);
 
   useEffect(() => {
-  // 🔥 set backend source first
+    // 🔥 set backend source first
     fetch(`http://127.0.0.1:8000/set-airspace-source?source=${airspaceSource}`)
       .then(() => {
         return fetch("http://127.0.0.1:8000/airspace-geojson");
@@ -208,45 +220,45 @@ function App() {
       });
   }, [airspaceSource]);
   useEffect(() => {
-  fetch("http://127.0.0.1:8000/obstacles")
-    .then((res) => res.json())
-    .then((data) => {
-      setObstacles({
-        no_fly_zones: data?.no_fly_zones ?? [],
-        slow_zones: data?.slow_zones ?? [],
+    fetch("http://127.0.0.1:8000/obstacles")
+      .then((res) => res.json())
+      .then((data) => {
+        setObstacles({
+          no_fly_zones: data?.no_fly_zones ?? [],
+          slow_zones: data?.slow_zones ?? [],
+        });
+      })
+      .catch(() => {
+        console.warn("Failed to load obstacles.");
+        setObstacles({
+          no_fly_zones: [],
+          slow_zones: [],
+        });
       });
-    })
-    .catch(() => {
-      console.warn("Failed to load obstacles.");
-      setObstacles({
-        no_fly_zones: [],
-        slow_zones: [],
+
+    /* fetch("http://127.0.0.1:8000/weather")
+      .then((res) => res.json())
+      .then((data) => {
+        setWeather(data ?? {});
+      })
+      .catch(() => {
+        console.warn("Failed to load weather.");
+        setWeather({});
+      }); */
+
+    fetch("http://127.0.0.1:8000/nodes")
+      .then((res) => res.json())
+      .then((data) => {
+        const nodeArray = Object.entries(data).map(([id, val]) => ({
+          id,
+          ...val,
+        }));
+        setNodes(nodeArray);
+      })
+      .catch(() => {
+        setError("Failed to load nodes from backend.");
       });
-    });
-
-  /* fetch("http://127.0.0.1:8000/weather")
-    .then((res) => res.json())
-    .then((data) => {
-      setWeather(data ?? {});
-    })
-    .catch(() => {
-      console.warn("Failed to load weather.");
-      setWeather({});
-    }); */
-
-  fetch("http://127.0.0.1:8000/nodes")
-    .then((res) => res.json())
-    .then((data) => {
-      const nodeArray = Object.entries(data).map(([id, val]) => ({
-        id,
-        ...val,
-      }));
-      setNodes(nodeArray);
-    })
-    .catch(() => {
-      setError("Failed to load nodes from backend.");
-    });
-}, []);
+  }, []);
 
   useEffect(() => {
     if (!selectedStart || !selectedEnd) {
@@ -256,7 +268,7 @@ function App() {
 
     const effectiveRouteTime = requestedGridTime ?? gridTime;
     const url = `http://127.0.0.1:8000/route?start=${selectedStart}&end=${selectedEnd}&departure_time=${encodeURIComponent(effectiveRouteTime)}`;
-    
+
     setIsRouting(true);
     setError("");
 
@@ -269,6 +281,8 @@ function App() {
       })
       .then((data) => {
         setRouteData(data);
+        setSelectedType("flight");
+        setSelectedNode(null);
         setError("");
         setIsRouting(false);
       })
@@ -356,6 +370,10 @@ function App() {
   }, [routeData, nodeMap]);
 
   const handleNodeSelect = (nodeId) => {
+    const node = nodeMap[nodeId] || null;
+    setSelectedType("port");
+    setSelectedNode(node);
+
     if (!selectedStart) {
       setSelectedStart(nodeId);
       setSelectedEnd(null);
@@ -384,115 +402,116 @@ function App() {
   };
 
   return (
-    <div style={{ display: "flex", height: "100vh", width: "100%" }}>
-      <div style={{ flex: 1 }}>
-        <MapContainer
-          center={[37.5, -121.5]}
-          zoom={7}
-          style={{ height: "100%", width: "100%" }}
-        >
-          <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100%" }}>
+      <div style={{ display: "flex", flex: 1 }}>
+        <div style={{ flex: 1 }}>
+          <MapContainer
+            center={[37.5, -121.5]}
+            zoom={7}
+            style={{ height: "100%", width: "100%" }}
+          >
+            <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
 
-          {(obstacles?.no_fly_zones ?? []).map((zone, idx) => (
-            <Circle
-              key={`nfz-${idx}`}
-              center={[zone.lat, zone.lon]}
-              radius={milesToMeters(zone.radius_miles)}
-              pathOptions={{
-                color: "red",
-                fillColor: "red",
-                fillOpacity: 0.2,
-                weight: 2,
-              }}
-            >
-              <Popup>
-                <b>{zone.name}</b>
-                <br />
-                No-fly zone
-              </Popup>
-            </Circle>
-          ))}
-
-          {(obstacles?.slow_zones ?? []).map((zone, idx) => (
-            <Circle
-              key={`slow-${idx}`}
-              center={[zone.lat, zone.lon]}
-              radius={milesToMeters(zone.radius_miles)}
-              pathOptions={{
-                color: "orange",
-                fillColor: "yellow",
-                fillOpacity: 0.15,
-                weight: 2,
-              }}
-            >
-              <Popup>
-                <b>{zone.name}</b>
-                <br />
-                Slow / caution zone
-                <br />
-                Penalty: {zone.penalty}
-              </Popup>
-            </Circle>
-          ))}
-
-          {showGridPoints &&
-            weatherGrid.map((point, idx) => {
-              const wx = point.weather || {};
-              const statusColor = weatherColor(wx.status);
-              const wind = wx.wind_speed_mph;
-
-              return (
-                <CircleMarker
-                  key={`grid-${idx}`}
-                  center={[point.lat, point.lon]}
-                  radius={gridRadiusFromWind(wind)}
-                  pathOptions={{
-                    color: statusColor,
-                    fillColor: statusColor,
-                    fillOpacity: 0.35,
-                    weight: 1,
-                  }}
-                >
-                  <Tooltip direction="top" offset={[0, -8]} opacity={0.95} sticky>
-                    <b>Weather Grid Point</b>
-                    <br />
-                    Lat: {point.lat.toFixed(3)}
-                    <br />
-                    Lon: {point.lon.toFixed(3)}
-                    <br />
-                    Time: {wx.forecast_time ?? "N/A"}
-                    <br />
-                    Status: {wx.status ?? "unknown"}
-                    <br />
-                    Wind: {wx.wind_speed_mph ?? "N/A"} mph
-                    <br />
-                    Gusts: {wx.wind_gusts_mph ?? "N/A"} mph
-                    <br />
-                    Precip: {wx.precipitation_mm ?? "N/A"} mm
-                  </Tooltip>
-                </CircleMarker>
-              );
-            })}
-
-          {showHazardRegions && 
-            buildHazardPolygons(weatherGrid).map((poly, idx) => (
-              <Polygon
-                key={`hazard-poly-${idx}`}
-                positions={poly}
+            {(obstacles?.no_fly_zones ?? []).map((zone, idx) => (
+              <Circle
+                key={`nfz-${idx}`}
+                center={[zone.lat, zone.lon]}
+                radius={milesToMeters(zone.radius_miles)}
                 pathOptions={{
                   color: "red",
                   fillColor: "red",
-                  fillOpacity: 0.12,
+                  fillOpacity: 0.2,
                   weight: 2,
                 }}
               >
                 <Popup>
-                  <b>Hazard Region</b>
+                  <b>{zone.name}</b>
                   <br />
-                  Merged unsafe-weather influence region.
+                  No-fly zone
                 </Popup>
-              </Polygon>
+              </Circle>
             ))}
+
+            {(obstacles?.slow_zones ?? []).map((zone, idx) => (
+              <Circle
+                key={`slow-${idx}`}
+                center={[zone.lat, zone.lon]}
+                radius={milesToMeters(zone.radius_miles)}
+                pathOptions={{
+                  color: "orange",
+                  fillColor: "yellow",
+                  fillOpacity: 0.15,
+                  weight: 2,
+                }}
+              >
+                <Popup>
+                  <b>{zone.name}</b>
+                  <br />
+                  Slow / caution zone
+                  <br />
+                  Penalty: {zone.penalty}
+                </Popup>
+              </Circle>
+            ))}
+
+            {showGridPoints &&
+              weatherGrid.map((point, idx) => {
+                const wx = point.weather || {};
+                const statusColor = weatherColor(wx.status);
+                const wind = wx.wind_speed_mph;
+
+                return (
+                  <CircleMarker
+                    key={`grid-${idx}`}
+                    center={[point.lat, point.lon]}
+                    radius={gridRadiusFromWind(wind)}
+                    pathOptions={{
+                      color: statusColor,
+                      fillColor: statusColor,
+                      fillOpacity: 0.35,
+                      weight: 1,
+                    }}
+                  >
+                    <Tooltip direction="top" offset={[0, -8]} opacity={0.95} sticky>
+                      <b>Weather Grid Point</b>
+                      <br />
+                      Lat: {point.lat.toFixed(3)}
+                      <br />
+                      Lon: {point.lon.toFixed(3)}
+                      <br />
+                      Time: {wx.forecast_time ?? "N/A"}
+                      <br />
+                      Status: {wx.status ?? "unknown"}
+                      <br />
+                      Wind: {wx.wind_speed_mph ?? "N/A"} mph
+                      <br />
+                      Gusts: {wx.wind_gusts_mph ?? "N/A"} mph
+                      <br />
+                      Precip: {wx.precipitation_mm ?? "N/A"} mm
+                    </Tooltip>
+                  </CircleMarker>
+                );
+              })}
+
+            {showHazardRegions &&
+              buildHazardPolygons(weatherGrid).map((poly, idx) => (
+                <Polygon
+                  key={`hazard-poly-${idx}`}
+                  positions={poly}
+                  pathOptions={{
+                    color: "red",
+                    fillColor: "red",
+                    fillOpacity: 0.12,
+                    weight: 2,
+                  }}
+                >
+                  <Popup>
+                    <b>Hazard Region</b>
+                    <br />
+                    Merged unsafe-weather influence region.
+                  </Popup>
+                </Polygon>
+              ))}
             {showAirspace &&
               airspaceGeojson?.features?.map((feature, idx) => {
                 const geom = feature.geometry;
@@ -588,99 +607,99 @@ function App() {
 
                 return null;
               })}
-            
-                    {nodes.map((node) => {
-            const isStart = node.id === selectedStart;
-            const isEnd = node.id === selectedEnd;
 
-            const wx = weather[node.id];
-            const wxColor = weatherColor(wx?.status);
+            {nodes.map((node) => {
+              const isStart = node.id === selectedStart;
+              const isEnd = node.id === selectedEnd;
+
+              const wx = weather[node.id];
+              const wxColor = weatherColor(wx?.status);
 
 
-            
-            return (
-              <div key={node.id}>
-                <Marker
-                  position={[node.lat, node.lon]}
-                  eventHandlers={{
-                    click: () => handleNodeSelect(node.id),
-                  }}
-                >
-                  <Tooltip direction="top" offset={[0, -8]} opacity={0.95} sticky>
-                    <b>{node.id}</b>
-                    <br />
-                    {node.name}
-                    <br />
-                    Type: {node.type}
-                    <br />
-                    <br />
-                    <b>Weather</b>
-                    <br />
-                    Status: {wx?.status ?? "loading"}
-                    <br />
-                    Wind: {wx?.wind_speed_mph ?? "N/A"} mph
-                    <br />
-                    Gusts: {wx?.wind_gusts_mph ?? "N/A"} mph
-                    <br />
-                    Visibility: {formatVisibilityMiles(wx?.visibility_m)} mi
-                    <br />
-                    Precip: {wx?.precipitation_mm ?? "N/A"} mm
-                  </Tooltip>
-                </Marker>
 
-                <CircleMarker
-                  center={[node.lat, node.lon]}
-                  radius={9}
-                  pathOptions={{
-                    color: wxColor,
-                    weight: 3,
-                    fillOpacity: 0,
-                  }}
-                />
+              return (
+                <div key={node.id}>
+                  <Marker
+                    position={[node.lat, node.lon]}
+                    eventHandlers={{
+                      click: () => handleNodeSelect(node.id),
+                    }}
+                  >
+                    <Tooltip direction="top" offset={[0, -8]} opacity={0.95} sticky>
+                      <b>{node.id}</b>
+                      <br />
+                      {node.name}
+                      <br />
+                      Type: {node.type}
+                      <br />
+                      <br />
+                      <b>Weather</b>
+                      <br />
+                      Status: {wx?.status ?? "loading"}
+                      <br />
+                      Wind: {wx?.wind_speed_mph ?? "N/A"} mph
+                      <br />
+                      Gusts: {wx?.wind_gusts_mph ?? "N/A"} mph
+                      <br />
+                      Visibility: {formatVisibilityMiles(wx?.visibility_m)} mi
+                      <br />
+                      Precip: {wx?.precipitation_mm ?? "N/A"} mm
+                    </Tooltip>
+                  </Marker>
 
-                {(isStart || isEnd) && (
                   <CircleMarker
                     center={[node.lat, node.lon]}
-                    radius={14}
+                    radius={9}
                     pathOptions={{
-                      color: isStart ? "green" : "red",
+                      color: wxColor,
                       weight: 3,
                       fillOpacity: 0,
                     }}
                   />
-                )}
-              </div>
-            );
-          })}
-          {routeData?.raw_polyline && routeData.raw_polyline.length > 1 && (
-            <Polyline
-              positions={routeData.raw_polyline}
-              pathOptions={{
-                color: "gray",
-                weight: 2,
-                opacity: 0.75,
-                dashArray: "6,8",
-              }}
-            />
-          )}
-          {routeData?.polyline && routeData.polyline.length > 1 && (
-            <Polyline
-              positions={routeData.polyline}
-              pathOptions={{
-                color: "blue",
-                weight: 5,
-                opacity: 0.5,
-              }}
-            >
-              <Popup>
-                <b>Field Route</b>
-                <br />
-                Continuous path (field-based routing)
-              </Popup>
-            </Polyline>
-          )}
 
-{/*           {routeSegments.map((segment, idx) => (
+                  {(isStart || isEnd) && (
+                    <CircleMarker
+                      center={[node.lat, node.lon]}
+                      radius={14}
+                      pathOptions={{
+                        color: isStart ? "green" : "red",
+                        weight: 3,
+                        fillOpacity: 0,
+                      }}
+                    />
+                  )}
+                </div>
+              );
+            })}
+            {routeData?.raw_polyline && routeData.raw_polyline.length > 1 && (
+              <Polyline
+                positions={routeData.raw_polyline}
+                pathOptions={{
+                  color: "gray",
+                  weight: 2,
+                  opacity: 0.75,
+                  dashArray: "6,8",
+                }}
+              />
+            )}
+            {routeData?.polyline && routeData.polyline.length > 1 && (
+              <Polyline
+                positions={routeData.polyline}
+                pathOptions={{
+                  color: "blue",
+                  weight: 5,
+                  opacity: 0.5,
+                }}
+              >
+                <Popup>
+                  <b>Field Route</b>
+                  <br />
+                  Continuous path (field-based routing)
+                </Popup>
+              </Polyline>
+            )}
+
+            {/*           {routeSegments.map((segment, idx) => (
             <Polyline
               key={idx}
               positions={segment.positions}
@@ -702,214 +721,31 @@ function App() {
               </Popup>
             </Polyline>
           ))} */}
-        </MapContainer>
-      </div>
-
-      <div
-        style={{
-          width: "360px",
-          padding: "16px",
-          borderLeft: "1px solid #ccc",
-          background: "#f7f7f7",
-          overflowY: "auto",
-          fontFamily: "Arial, sans-serif",
-        }}
-      >
-        <h2 style={{ marginTop: 0 }}>CITRIS Routing Panel</h2>
-
-        <p>
-          <strong>Instructions:</strong>
-          <br />
-          Click one node for the start, then another for the destination.
-        </p>
-
-        <p>
-          <strong>Start:</strong> {selectedStart || "None"}
-          <br />
-          <strong>End:</strong> {selectedEnd || "None"}
-        </p>
-
-        <button onClick={clearSelection} style={{ marginBottom: "16px" }}>
-          Clear Selection
-        </button>
-
-        <div style={{ marginBottom: "16px" }}>
-          <strong>Weather Overlay</strong>
-          <br />
-
-          <label style={{ display: "block", marginTop: "8px" }}>
-            <input
-              type="checkbox"
-              checked={showGridPoints}
-              onChange={(e) => setShowGridPoints(e.target.checked)}
-              style={{ marginRight: "8px" }}
-            />
-            Show grid points
-          </label>
-
-          <label style={{ display: "block", marginTop: "8px" }}>
-            <input
-              type="checkbox"
-              checked={showHazardRegions}
-              onChange={(e) => setShowHazardRegions(e.target.checked)}
-              style={{ marginRight: "8px" }}
-            />
-            Show hazard regions
-          </label>
-
-          <label style={{ display: "block", marginTop: "10px" }}>
-            Replay time:
-            <input
-              type="datetime-local"
-              value={gridTime}
-              onChange={(e) => setGridTime(e.target.value)}
-              style={{
-                display: "block",
-                marginTop: "6px",
-                width: "100%",
-                padding: "6px",
-              }}
-            />
-          </label>
-          <label style={{ display: "block", marginTop: "8px" }}>
-            <input
-              type="checkbox"
-              checked={showAirspace}
-              onChange={(e) => setShowAirspace(e.target.checked)}
-              style={{ marginRight: "8px" }}
-            />
-            Show airspace
-          </label>
-          <label style={{ display: "block", marginTop: "10px" }}>
-            Airspace Source:
-            <select
-              value={airspaceSource}
-              onChange={(e) => setAirspaceSource(e.target.value)}
-              style={{ display: "block", marginTop: "6px", width: "100%" }}
-            >
-              {/* <option value="foreflight">ForeFlight</option> */}
-              <option value="geojson">Local OpenAIR</option>
-            </select>
-          </label>
-          <button
-            onClick={() => {
-            //  if (preloadStatus?.status !== "complete") {
-            //    alert("Please initialize simulation first.");
-            //    return;
-            //  }
-              setRequestedGridTime(gridTime);
-            }}
-            style={{
-              marginTop: "8px",
-              width: "100%",
-              padding: "8px",
-              fontWeight: "bold",
-            }}
-          >
-            Load Weather for This Time
-          </button>
+          </MapContainer>
         </div>
-
-        <div style={{ marginBottom: "16px" }}>
-          <strong>Legend</strong>
-          <div style={{ color: "green" }}>Green = preferred</div>
-          <div style={{ color: "goldenrod" }}>Yellow = acceptable</div>
-          <div style={{ color: "orange" }}>Orange = less preferred</div>
-          <div style={{ color: "deepskyblue" }}>Blue = detour segment</div>
-          <div style={{ color: "red" }}>Red circle = no-fly zone</div>
-        </div>
-
-        {isRouting && (
-          <div
-            style={{
-              marginBottom: "16px",
-              padding: "12px",
-              borderRadius: "8px",
-              background: "#e8f1ff",
-              border: "1px solid #b8cffc",
-              color: "#1f4ea3",
-            }}
-          >
-            <strong>Calculating route...</strong>
-            <br />
-            Checking feasibility, weather, and routing cost.
-          </div>
-        )}
-
-        {error && (
-          <div style={{ color: "darkred", marginBottom: "16px" }}>
-            <strong>Error:</strong> {error}
-          </div>
-        )}
-
-        {routeData && (
-          <div>
-            <h3>Route Result</h3>
-            <p>
-              <strong>Path:</strong>{" "}
-              {Array.isArray(routeData.path)
-                ? routeData.path.join(" → ")
-                : Array.isArray(routeData.stops)
-                  ? routeData.stops.join(" → ")
-                  : "N/A"}
-            </p>
-            <p>
-              <strong>Total Distance:</strong>{" "}
-              {routeData.total_distance_miles ?? routeData.total_distance ?? routeData.distance ?? "N/A"} mi
-              <br />
-              <strong>Total Cost:</strong>{" "}
-              {routeData.total_cost ?? routeData.score ?? routeData.cost ?? "N/A"}
-              <br />
-              <strong>Legs:</strong>{" "}
-              {routeData.num_legs
-                ?? routeData.leg_count
-                ?? (Array.isArray(routeData.legs) ? routeData.legs.length : "N/A")}
-            </p>
-
-            <h4>Legs</h4>
-            <ul style={{ paddingLeft: "18px" }}>
-              {Array.isArray(routeData.legs) ? (
-                routeData.legs.map((leg, idx) => (
-                  <li key={idx} style={{ marginBottom: "10px" }}>
-                    <strong>
-                      {leg.from} → {leg.to}
-                    </strong>
-                    <br />
-                    {leg.distance_miles ?? "N/A"} mi
-                    <br />
-                    <span style={{ color: routeColor(leg.route_class) }}>
-                      {leg.route_class ?? "unknown"}
-                    </span>
-                    {Array.isArray(leg.via) && leg.via.length > 0 && (
-                      <>
-                        <br />
-                        via {leg.via.length} detour point(s)
-                      </>
-                    )}
-                    {Array.isArray(leg.hazards) && leg.hazards.length > 0 && (
-                      <>
-                        <br />
-                        Hazards:
-                        <ul style={{ marginTop: "4px", paddingLeft: "18px" }}>
-                          {leg.hazards.map((hz, hzIdx) => (
-                            <li key={hzIdx}>
-                              {hz.name} ({hz.type}, {hz.mode})
-                            </li>
-                          ))}
-                        </ul>
-                      </>
-                    )}
-                  </li>
-                ))
-              ) : (
-                <li>No leg details available.</li>
-              )}
-            </ul>
-          </div>
-        )}
-
-        {!routeData && !error && !isRouting && <p>No route selected yet.</p>}
+        <RightPanel
+          selectedType={selectedType}
+          selectedNode={selectedNode}
+          routeData={routeData}
+          weather={weather}
+        />
       </div>
+      <BottomToolbar
+        selectedDate={selectedDate}
+        setSelectedDate={setSelectedDate}
+        startHour={startHour}
+        setStartHour={setStartHour}
+        endHour={endHour}
+        setEndHour={setEndHour}
+        currentHour={currentHour}
+        setCurrentHour={setCurrentHour}
+        showWeather={showWeather}
+        setShowWeather={setShowWeather}
+        showPopulation={showPopulation}
+        setShowPopulation={setShowPopulation}
+        showFlights={showFlights}
+        setShowFlights={setShowFlights}
+      />
     </div>
   );
 }

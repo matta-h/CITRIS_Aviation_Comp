@@ -361,8 +361,21 @@ def candidate_exchange_nodes(start: str, end: str) -> List[str]:
     airport_ids = ["KSQL", "KLVK", "KCVH", "KSNS", "KOAR", "KNUQ"]
     return [node_id for node_id in airport_ids if node_id not in {start, end}]
 
-def _finalize_selected_candidate(best: dict, raw_direct_distance: float, cruise_alt_ft: float) -> dict:
+def _finalize_selected_candidate(best: dict, raw_direct_distance: float, cruise_alt_ft: float, departure_time_iso: str) -> dict:
     best_route = best["route"]
+
+    # compute times
+    departure_time = departure_time_iso
+    total_minutes = best_route.get("total_time_minutes", 0)
+
+    # simple ISO time add (minutes → seconds)
+    try:
+        from datetime import datetime, timedelta
+        dt = datetime.fromisoformat(departure_time_iso)
+        arrival_dt = dt + timedelta(minutes=total_minutes)
+        arrival_time = arrival_dt.isoformat(timespec="minutes")
+    except:
+        arrival_time = None
 
     return {
         **best_route,
@@ -372,6 +385,8 @@ def _finalize_selected_candidate(best: dict, raw_direct_distance: float, cruise_
         "score": round(best["score"], 2),
         "raw_direct_distance_miles": round(raw_direct_distance, 2),
         "selected_cruise_alt_ft": cruise_alt_ft,
+        "departure_time": departure_time,
+        "arrival_time": arrival_time,
     }
 
 def plan_mission(
@@ -413,7 +428,7 @@ def plan_mission(
                     f"dist={direct_dist:.2f} score={direct_score:.2f}"
                 )
                 dprint(f"[MISSION] completed in {time.time() - t0:.2f}s")
-                return _finalize_selected_candidate(direct, raw_direct_distance, cruise_alt_ft)
+                return _finalize_selected_candidate(direct, raw_direct_distance, cruise_alt_ft, departure_time_iso)
 
     exchange_nodes = candidate_exchange_nodes(start, end)
     dprint(f"[MISSION] exchange candidates: {exchange_nodes}")
@@ -441,4 +456,4 @@ def plan_mission(
     )
     dprint(f"[MISSION] completed in {time.time() - t0:.2f}s")
 
-    return _finalize_selected_candidate(best, raw_direct_distance, cruise_alt_ft)
+    return _finalize_selected_candidate(best, raw_direct_distance, cruise_alt_ft, departure_time_iso)

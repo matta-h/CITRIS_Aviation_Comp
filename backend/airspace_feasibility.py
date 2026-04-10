@@ -74,8 +74,16 @@ def evaluate_airspace_constraints_for_polyline(
     hard_seen: Set[tuple] = set()
     soft_seen: Set[tuple] = set()
 
-    for point in polyline:
+    # === allow tolerance near endpoints (airport ingress/egress) ===
+    ENDPOINT_TOLERANCE_POINTS = 5  # first/last N points are exempt
+    n_points = len(polyline)
+
+    for idx, point in enumerate(polyline):
         lat, lon = point
+
+        # Skip constraint enforcement near endpoints
+        if idx < ENDPOINT_TOLERANCE_POINTS or idx > n_points - ENDPOINT_TOLERANCE_POINTS:
+            continue
 
         for c in constraints:
             if c.geometry_type != "polygon" or not c.polygon_points:
@@ -107,7 +115,10 @@ def evaluate_airspace_constraints_for_polyline(
                 if key not in soft_seen:
                     soft_seen.add(key)
                     soft_conflicts.append(conflict_info)
-
+    if hard_conflicts:
+        print(f"[AIRSPACE DEBUG] hard conflicts: {[c['name'] for c in hard_conflicts]}")
+    if soft_conflicts:
+        print(f"[AIRSPACE DEBUG] soft conflicts: {[c['name'] for c in soft_conflicts]}")
     return {
         "is_feasible": len(hard_conflicts) == 0,
         "hard_conflicts": hard_conflicts,

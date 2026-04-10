@@ -323,8 +323,10 @@ def get_global_airspace() -> List[Constraint]:
                 airspace_class = str(z.get("class", "")).upper()
 
                 mode = z.get("mode", "soft")
-                if airspace_class in {"P", "R"}:
+                if airspace_class in {"P"}:
                     mode = "hard"
+                elif airspace_class in {"R"}:
+                    mode = "soft"  # allow with penalty instead of rejection
 
                 severity = 1.0 if mode == "hard" else 0.5
 
