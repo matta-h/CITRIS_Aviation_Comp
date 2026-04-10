@@ -4,6 +4,7 @@ import {
   TileLayer,
   Marker,
   Popup,
+  Tooltip,
   Polyline,
   CircleMarker,
   Circle,
@@ -169,7 +170,7 @@ function airspaceStyle(feature) {
 
 function App() {
   const [airspaceGeojson, setAirspaceGeojson] = useState(null);
-  const [airspaceSource, setAirspaceSource] = useState("geojson");
+  const [airspaceSource, setAirspaceSource] = useState("openair");
   const [showAirspace, setShowAirspace] = useState(true);
   const [nodes, setNodes] = useState([]);
   const [selectedStart, setSelectedStart] = useState(null);
@@ -223,7 +224,7 @@ function App() {
       });
     });
 
-  fetch("http://127.0.0.1:8000/weather")
+  /* fetch("http://127.0.0.1:8000/weather")
     .then((res) => res.json())
     .then((data) => {
       setWeather(data ?? {});
@@ -231,7 +232,7 @@ function App() {
     .catch(() => {
       console.warn("Failed to load weather.");
       setWeather({});
-    });
+    }); */
 
   fetch("http://127.0.0.1:8000/nodes")
     .then((res) => res.json())
@@ -277,6 +278,20 @@ function App() {
         setIsRouting(false);
       });
   }, [selectedStart, selectedEnd, requestedGridTime]);
+
+  useEffect(() => {
+    const effectiveWeatherTime = requestedGridTime ?? gridTime;
+
+    fetch(`http://127.0.0.1:8000/weather?target_time=${encodeURIComponent(effectiveWeatherTime)}`)
+      .then((res) => res.json())
+      .then((data) => {
+        setWeather(data ?? {});
+      })
+      .catch(() => {
+        console.warn("Failed to load weather.");
+        setWeather({});
+      });
+  }, [gridTime, requestedGridTime]);
 
   useEffect(() => {
     if (!showWeatherGrid || !requestedGridTime) {
@@ -438,7 +453,7 @@ function App() {
                     weight: 1,
                   }}
                 >
-                  <Popup>
+                  <Tooltip direction="top" offset={[0, -8]} opacity={0.95} sticky>
                     <b>Weather Grid Point</b>
                     <br />
                     Lat: {point.lat.toFixed(3)}
@@ -454,7 +469,7 @@ function App() {
                     Gusts: {wx.wind_gusts_mph ?? "N/A"} mph
                     <br />
                     Precip: {wx.precipitation_mm ?? "N/A"} mm
-                  </Popup>
+                  </Tooltip>
                 </CircleMarker>
               );
             })}
@@ -484,7 +499,7 @@ function App() {
                 const props = feature.properties || {};
 
                 const popupText = (
-                  <Popup>
+                  <Tooltip direction="top" offset={[0, -8]} opacity={0.95} sticky>
                     <b>
                       {String(
                         props.name ??
@@ -522,7 +537,7 @@ function App() {
                       ?? props.base
                       ?? props.BASE
                       ?? "N/A"
-                    } {props.lower_limit_reference ?? props.lower_ref ?? props.floor_ref ?? ""}
+                    }
                     <br />
                     Upper: {
                       props.upper_limit
@@ -533,8 +548,8 @@ function App() {
                       ?? props.top
                       ?? props.TOP
                       ?? "N/A"
-                    } {props.upper_limit_reference ?? props.upper_ref ?? props.ceiling_ref ?? ""}
-                  </Popup>
+                    }
+                  </Tooltip>
                 );
 
                 if (geom.type === "Polygon") {
@@ -591,7 +606,7 @@ function App() {
                     click: () => handleNodeSelect(node.id),
                   }}
                 >
-                  <Popup>
+                  <Tooltip direction="top" offset={[0, -8]} opacity={0.95} sticky>
                     <b>{node.id}</b>
                     <br />
                     {node.name}
@@ -610,7 +625,7 @@ function App() {
                     Visibility: {formatVisibilityMiles(wx?.visibility_m)} mi
                     <br />
                     Precip: {wx?.precipitation_mm ?? "N/A"} mm
-                  </Popup>
+                  </Tooltip>
                 </Marker>
 
                 <CircleMarker
@@ -772,8 +787,8 @@ function App() {
               onChange={(e) => setAirspaceSource(e.target.value)}
               style={{ display: "block", marginTop: "6px", width: "100%" }}
             >
-              <option value="foreflight">ForeFlight</option>
-              <option value="geojson">Local GeoJSON</option>
+              {/* <option value="foreflight">ForeFlight</option> */}
+              <option value="geojson">Local OpenAIR</option>
             </select>
           </label>
           <button

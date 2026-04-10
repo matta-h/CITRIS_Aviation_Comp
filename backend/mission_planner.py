@@ -9,6 +9,7 @@ from backend.routing import shortest_path_field
 from backend.airspace_adapter import get_global_airspace, filter_constraints_by_bounds
 from backend.airspace_feasibility import evaluate_airspace_constraints_for_polyline
 from backend.terrain_feasibility import evaluate_terrain_for_polyline
+from backend.weather_history import fetch_weather_for_nodes
 
 MAX_DIRECT_MISSION_MILES = 85.0
 EFFECTIVE_AIRSPEED_MPH = 120.0
@@ -167,6 +168,27 @@ def apply_airspace_checks(
     updated["airspace_feasibility"] = feasibility
     return updated
 
+def endpoint_weather_ok(start: str, end: str, departure_time_iso: str) -> bool:
+    weather = fetch_weather_for_nodes(
+        {
+            start: NODES[start],
+            end: NODES[end],
+        },
+        departure_time_iso,
+    )
+
+    start_status = weather.get(start, {}).get("status")
+    end_status = weather.get(end, {}).get("status")
+
+    if start_status == "unsafe":
+        dprint(f"[MISSION] rejected: unsafe departure weather at {start}")
+        return False
+
+    if end_status == "unsafe":
+        dprint(f"[MISSION] rejected: unsafe arrival weather at {end}")
+        return False
+
+    return True
 
 def build_direct_candidate(
     start: str,
@@ -175,6 +197,8 @@ def build_direct_candidate(
     cruise_alt_ft: float = DEFAULT_CRUISE_ALT_FT,
 ) -> Optional[dict]:
     dprint(f"[MISSION] trying direct {start}->{end}")
+    if not endpoint_weather_ok(start, end, departure_time_iso):
+        return None
 
     t_direct = time.time()
     route = shortest_path_field(start, end, departure_time_iso)
@@ -233,6 +257,11 @@ def build_exchange_candidate(
     cruise_alt_ft: float = DEFAULT_CRUISE_ALT_FT,
 ) -> Optional[dict]:
     dprint(f"[MISSION] trying exchange {start}->{exchange}->{end}")
+    if not endpoint_weather_ok(start, exchange, departure_time_iso):
+        return None
+
+    if not endpoint_weather_ok(exchange, end, departure_time_iso):
+        return None
 
     t_leg1 = time.time()
     leg1 = solve_leg_cached(start, exchange, departure_time_iso)

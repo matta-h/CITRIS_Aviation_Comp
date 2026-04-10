@@ -6,14 +6,12 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from backend.geometry import point_in_polygon
-from backend.airspace import load_airspace
+from backend.airspace_legacy import load_airspace
 from backend.geometry import (segment_hits_zone)
 from backend.weather_grid import get_cached_weather_grid
 from backend.weather import add_minutes_iso
 from backend.routing_single import (
     NODES,
-    NO_FLY_ZONES,
-    SLOW_ZONES,
     MAX_LEG_MILES,
     scaled_hazard_radius_miles,
     distance_between,
@@ -31,6 +29,10 @@ EFFECTIVE_AIRSPEED_MPH = 120.0
 TRANSFER_TIME_MIN = 30.0
 TIME_TIE_THRESHOLD_MIN = 5.0
 AIRSPACE_CACHE = load_airspace()
+
+USE_LEGACY_STATIC_OBSTACLES = False
+LEGACY_NO_FLY_ZONES = []
+LEGACY_SLOW_ZONES = []
 
 def point_in_zone(lat, lon, zone):
     if zone.get("geometry", "circle") == "circle":
@@ -114,7 +116,7 @@ def build_field_points(target_time_iso: str) -> List[dict]:
 
     weather_hard, weather_soft = build_weather_hazard_zones(target_time_iso)
     airspace = AIRSPACE_CACHE
-    hard_zones = list(NO_FLY_ZONES) + weather_hard + airspace 
+    hard_zones = list(LEGACY_NO_FLY_ZONES if USE_LEGACY_STATIC_OBSTACLES else []) + weather_hard + airspace
 
     points: List[dict] = []
     lat = lat_min
@@ -223,8 +225,8 @@ def build_field_graph(target_time_iso: str):
     weather_hard, weather_soft = build_weather_hazard_zones(target_time_iso)
     airspace = AIRSPACE_CACHE
 
-    hard_zones = list(NO_FLY_ZONES) + weather_hard + airspace
-    soft_zones = list(SLOW_ZONES) + weather_soft
+    hard_zones = list(LEGACY_NO_FLY_ZONES if USE_LEGACY_STATIC_OBSTACLES else []) + weather_hard + airspace
+    soft_zones = list(LEGACY_SLOW_ZONES if USE_LEGACY_STATIC_OBSTACLES else []) + weather_soft
 
     field_points = build_field_points(target_time_iso)
     airports = [
@@ -382,8 +384,8 @@ def _run_field_search(
             weather_hard, weather_soft = build_weather_hazard_zones(departure_time_iso)
             airspace = AIRSPACE_CACHE
 
-            hard_zones = list(NO_FLY_ZONES) + weather_hard + airspace
-            soft_zones = list(SLOW_ZONES) + weather_soft
+            hard_zones = list(LEGACY_NO_FLY_ZONES if USE_LEGACY_STATIC_OBSTACLES else []) + weather_hard + airspace
+            soft_zones = list(LEGACY_SLOW_ZONES if USE_LEGACY_STATIC_OBSTACLES else []) + weather_soft
 
             polyline = simplify_polyline_with_hard_and_soft_zones(
                 raw_polyline,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import json
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 
@@ -15,7 +14,7 @@ load_dotenv(Path(__file__).with_name(".env"))
 
 FORE_FLIGHT_BASE_URL = "https://aadp.foreflight.com"
 AIRSPACES_PATH = "/api/v1/airspaces"
-AIRSPACE_SOURCE = "foreflight"  # "foreflight" or "geojson"
+AIRSPACE_SOURCE = "openair"  # "foreflight" or "geojson"
 
 # Operating region cache: West, South, East, North
 NORCAL_BOUNDS: Tuple[float, float, float, float] = (-124.0, 35.5, -119.0, 39.5)
@@ -142,22 +141,40 @@ def get_airspace_geojson_for_frontend(
     allowed_classes: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
     if AIRSPACE_SOURCE == "foreflight":
-        geojson = get_global_airspace_geojson()
+        geojson = fetch_airspace_geojson(bounds)
         return filter_geojson_by_bounds_and_class(geojson, bounds, allowed_classes)
 
-    elif AIRSPACE_SOURCE == "geojson":
-        base = os.path.dirname(__file__)
-        path = os.path.join(base, "data", "airspace.geojson")
-
-        with open(path, "r") as f:
-            geojson = json.load(f)
-
+    elif AIRSPACE_SOURCE == "openair":
+        zones = load_airspace()
         features = []
-        for feature in geojson.get("features", []):
+
+        for z in zones:
+            coords = [[lon, lat] for lat, lon in z.get("points", [])]
+
+            feature = {
+                "type": "Feature",
+                "properties": {
+                    "name": z.get("name", "airspace"),
+                    "class": z.get("class"),
+                    "type": z.get("class"),
+                    "lower_limit": z.get("lower_raw"),
+                    "upper_limit": z.get("upper_raw"),
+                    "lower_ft": z.get("lower_ft"),
+                    "upper_ft": z.get("upper_ft"),
+                    "lower_limit_reference": z.get("lower_ref"),
+                    "upper_limit_reference": z.get("upper_ref"),
+                    "source": "openair",
+                },
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [coords],
+                },
+            }
+
             if _geojson_feature_intersects_bounds(feature, bounds):
                 features.append(feature)
 
-        adprint(f"[AIRSPACE GEOJSON] returning {len(features)} local geojson features")
+        adprint(f"[AIRSPACE OPENAIR] returning {len(features)} frontend features")
         return {
             "type": "FeatureCollection",
             "features": features,
@@ -288,7 +305,6 @@ def fetch_airspace_constraints(
     adprint(f"[AIRSPACE API] total constraints={len(constraints)}")
     return constraints
 
-
 def get_global_airspace() -> List[Constraint]:
     global GLOBAL_AIRSPACE
 
@@ -298,38 +314,50 @@ def get_global_airspace() -> List[Constraint]:
             GLOBAL_AIRSPACE = fetch_airspace_constraints(NORCAL_BOUNDS)
             adprint(f"[AIRSPACE API] loaded {len(GLOBAL_AIRSPACE)} total NorCal constraints")
 
-        elif AIRSPACE_SOURCE == "geojson":
-            adprint("[AIRSPACE GEOJSON] loading local geojson airspace...")
+        elif AIRSPACE_SOURCE == "openair":
+            adprint("[AIRSPACE OPENAIR] loading local OpenAIR airspace...")
             zones = load_airspace()
 
             constraints: List[Constraint] = []
             for z in zones:
+                airspace_class = str(z.get("class", "")).upper()
+
+                mode = z.get("mode", "soft")
+                if airspace_class in {"P", "R"}:
+                    mode = "hard"
+
+                severity = 1.0 if mode == "hard" else 0.5
+
                 constraints.append(
                     Constraint(
                         name=z.get("name", "airspace"),
                         constraint_type="airspace",
-                        mode=z.get("mode", "hard"),
+                        mode=mode,
                         geometry_type="polygon",
                         polygon_points=z.get("points", []),
-                        floor_alt_ft=0.0,
-                        ceiling_alt_ft=999999.0,
-                        severity=1.0,
+                        floor_alt_ft=z.get("lower_ft"),
+                        ceiling_alt_ft=z.get("upper_ft"),
+                        severity=severity,
                         metadata={
-                            "source": "geojson",
+                            "source": "openair",
                             "hazard_type": z.get("hazard_type", "airspace"),
-                            "type": "RPD",
+                            "type": airspace_class,
+                            "class": airspace_class,
+                            "lower_raw": z.get("lower_raw"),
+                            "upper_raw": z.get("upper_raw"),
+                            "lower_ref": z.get("lower_ref"),
+                            "upper_ref": z.get("upper_ref"),
                         },
                     )
                 )
 
             GLOBAL_AIRSPACE = constraints
-            adprint(f"[AIRSPACE GEOJSON] loaded {len(GLOBAL_AIRSPACE)} total geojson constraints")
+            adprint(f"[AIRSPACE OPENAIR] loaded {len(GLOBAL_AIRSPACE)} total openair constraints")
 
         else:
             raise ValueError(f"Unknown AIRSPACE_SOURCE: {AIRSPACE_SOURCE}")
 
     return GLOBAL_AIRSPACE
-
 
 def _constraint_intersects_bounds(
     constraint: Constraint,

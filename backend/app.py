@@ -15,7 +15,7 @@ from backend import airspace_adapter
 from backend.airspace_adapter import build_frontend_airspace_overlays
 from backend.airspace_adapter import get_airspace_geojson_for_frontend
 from backend.terrain_feasibility import evaluate_terrain_for_polyline
-from backend.airspace import load_airspace
+from backend.airspace_legacy import load_airspace
 from backend.routing import build_weather_hazard_zones
 
 
@@ -59,9 +59,9 @@ def get_obstacles(target_time: str | None = None):
         target_time or datetime.now().isoformat(timespec="minutes")
     )
     return {
-        "no_fly_zones": NO_FLY_ZONES,
-        "slow_zones": SLOW_ZONES,
-        "airspace_zones": load_airspace(),
+        "no_fly_zones": [],
+        "slow_zones": [],
+        "airspace_zones": [],
         "weather_hard": weather_hard,
         "weather_soft": weather_soft,
     }
@@ -75,12 +75,12 @@ def terrain_check(payload: dict):
 @app.get("/airspace-geojson")
 def get_airspace_geojson():
     bounds = (-124.0, 35.5, -119.0, 39.5)
-    return get_airspace_geojson_for_frontend(bounds, {"B", "C", "D", "G"})
+    return get_airspace_geojson_for_frontend(bounds, None)
 
 @app.get("/set-airspace-source")
 def set_airspace_source(source: str):
-    if source not in {"foreflight", "geojson"}:
-        raise HTTPException(status_code=400, detail="source must be 'foreflight' or 'geojson'")
+    if source not in {"foreflight", "openair"}:
+        raise HTTPException(status_code=400, detail="source must be 'foreflight' or 'openair'")
 
     airspace_adapter.AIRSPACE_SOURCE = source
     airspace_adapter.GLOBAL_AIRSPACE = None
