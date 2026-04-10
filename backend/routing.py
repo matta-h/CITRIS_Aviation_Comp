@@ -276,6 +276,79 @@ def build_field_graph(target_time_iso: str):
 
     return graph, point_lookup
 
+def compress_path_nodes(path_nodes: List[str]) -> List[str]:
+    """
+    Keep only meaningful mission nodes for display:
+    - always keep first and last
+    - keep any real network node in NODES
+    - drop intermediate field nodes like F1234
+    """
+    if not path_nodes:
+        return []
+
+    compressed = [path_nodes[0]]
+
+    for node_id in path_nodes[1:-1]:
+        if node_id in NODES:
+            if compressed[-1] != node_id:
+                compressed.append(node_id)
+
+    if compressed[-1] != path_nodes[-1]:
+        compressed.append(path_nodes[-1])
+
+    return compressed
+
+
+def compress_legs_for_display(path_edges: List[dict]) -> List[dict]:
+    """
+    Merge consecutive field edges into larger display legs.
+    Keep detailed polyline separately; this is only for UI readability.
+    """
+    if not path_edges:
+        return []
+
+    merged = []
+    current = None
+
+    def node_type(node_id: str) -> str:
+        return "network" if node_id in NODES else "field"
+
+    for edge in path_edges:
+        edge_from_type = node_type(edge["from"])
+        edge_to_type = node_type(edge["to"])
+
+        if current is None:
+            current = {
+                "from": edge["from"],
+                "to": edge["to"],
+                "distance_miles": edge["distance_miles"],
+                "route_class": edge.get("route_class", "field"),
+                "hazards": list(edge.get("hazards", [])),
+            }
+            continue
+
+        # Merge if we are still traveling through field nodes
+        if current["to"] not in NODES and edge["from"] == current["to"]:
+            current["to"] = edge["to"]
+            current["distance_miles"] += edge["distance_miles"]
+            current["hazards"].extend(edge.get("hazards", []))
+        else:
+            current["distance_miles"] = round(current["distance_miles"], 2)
+            merged.append(current)
+            current = {
+                "from": edge["from"],
+                "to": edge["to"],
+                "distance_miles": edge["distance_miles"],
+                "route_class": edge.get("route_class", "field"),
+                "hazards": list(edge.get("hazards", [])),
+            }
+
+    if current is not None:
+        current["distance_miles"] = round(current["distance_miles"], 2)
+        merged.append(current)
+
+    return merged
+
 def _run_field_search(
     graph,
     point_lookup,
@@ -296,23 +369,10 @@ def _run_field_search(
 
         if current == end:
             total_distance = sum(e["distance_miles"] for e in path_edges)
-            total_minutes = 0.0
-            legs = []
-            cumulative_minutes = 0.0
+            cumulative_minutes = sum(e["flight_time_min"] for e in path_edges)
 
-            for edge in path_edges:
-                leg_minutes = edge["flight_time_min"]
-                cumulative_minutes += leg_minutes
-
-                leg = {
-                    "from": edge["from"],
-                    "to": edge["to"],
-                    "distance_miles": round(edge["distance_miles"], 2),
-                    "route_class": edge.get("route_class", "field"),
-                    "eta": add_minutes_iso(departure_time_iso, cumulative_minutes),
-                    "hazards": edge.get("hazards", []),
-                }
-                legs.append(leg)
+            display_path = compress_path_nodes(path_nodes)
+            display_legs = compress_legs_for_display(path_edges)
 
             raw_polyline = [
                 [point_lookup[node_id]["lat"], point_lookup[node_id]["lon"]]
@@ -332,15 +392,17 @@ def _run_field_search(
             )
 
             return {
-                "path": path_nodes,
+                "path": display_path,
+                "raw_path": path_nodes,
                 "polyline": polyline,
                 "raw_polyline": raw_polyline,
-                "legs": legs,
+                "legs": display_legs,
+                "raw_legs": path_edges,
                 "departure_time": departure_time_iso,
                 "arrival_time": add_minutes_iso(departure_time_iso, cumulative_minutes),
                 "total_distance_miles": round(total_distance, 2),
                 "total_cost": round(total_cost, 2),
-                "num_legs": len(legs),
+                "num_legs": len(display_legs),
                 "total_time_minutes": round(cumulative_minutes, 1),
             }
 

@@ -11,6 +11,7 @@ from backend.weather_grid import (
     start_preload_weather_day,
     get_preload_status,
 )
+from backend import airspace_adapter
 from backend.airspace_adapter import build_frontend_airspace_overlays
 from backend.airspace_adapter import get_airspace_geojson_for_frontend
 from backend.terrain_feasibility import evaluate_terrain_for_polyline
@@ -75,6 +76,17 @@ def terrain_check(payload: dict):
 def get_airspace_geojson():
     bounds = (-124.0, 35.5, -119.0, 39.5)
     return get_airspace_geojson_for_frontend(bounds, {"B", "C", "D", "G"})
+
+@app.get("/set-airspace-source")
+def set_airspace_source(source: str):
+    if source not in {"foreflight", "geojson"}:
+        raise HTTPException(status_code=400, detail="source must be 'foreflight' or 'geojson'")
+
+    airspace_adapter.AIRSPACE_SOURCE = source
+    airspace_adapter.GLOBAL_AIRSPACE = None
+    airspace_adapter.GLOBAL_AIRSPACE_GEOJSON = None
+
+    return {"status": "ok", "source": source}
 
 @app.get("/airspace-overlays")
 def get_airspace_overlays():

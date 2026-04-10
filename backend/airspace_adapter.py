@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 
@@ -8,11 +9,13 @@ import requests
 from dotenv import load_dotenv
 
 from backend.constraint_model import Constraint
+from backend.airspace import load_airspace
 
 load_dotenv(Path(__file__).with_name(".env"))
 
 FORE_FLIGHT_BASE_URL = "https://aadp.foreflight.com"
 AIRSPACES_PATH = "/api/v1/airspaces"
+AIRSPACE_SOURCE = "foreflight"  # "foreflight" or "geojson"
 
 # Operating region cache: West, South, East, North
 NORCAL_BOUNDS: Tuple[float, float, float, float] = (-124.0, 35.5, -119.0, 39.5)
@@ -112,21 +115,6 @@ def _geojson_feature_intersects_bounds(
 
     return False
 
-
-def get_global_airspace_geojson() -> Dict[str, Any]:
-    global GLOBAL_AIRSPACE_GEOJSON
-
-    if GLOBAL_AIRSPACE_GEOJSON is None:
-        adprint("[AIRSPACE GEOJSON] loading NorCal/global GeoJSON...")
-        GLOBAL_AIRSPACE_GEOJSON = fetch_airspace_geojson(NORCAL_BOUNDS)
-        adprint(
-            f"[AIRSPACE GEOJSON] loaded "
-            f"{len(GLOBAL_AIRSPACE_GEOJSON.get('features', []))} features"
-        )
-
-    return GLOBAL_AIRSPACE_GEOJSON
-
-
 def filter_geojson_by_bounds_and_class(
     geojson: Dict[str, Any],
     bounds: Tuple[float, float, float, float],
@@ -153,8 +141,29 @@ def get_airspace_geojson_for_frontend(
     bounds: Tuple[float, float, float, float],
     allowed_classes: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
-    geojson = get_global_airspace_geojson()
-    return filter_geojson_by_bounds_and_class(geojson, bounds, allowed_classes)
+    if AIRSPACE_SOURCE == "foreflight":
+        geojson = get_global_airspace_geojson()
+        return filter_geojson_by_bounds_and_class(geojson, bounds, allowed_classes)
+
+    elif AIRSPACE_SOURCE == "geojson":
+        base = os.path.dirname(__file__)
+        path = os.path.join(base, "data", "airspace.geojson")
+
+        with open(path, "r") as f:
+            geojson = json.load(f)
+
+        features = []
+        for feature in geojson.get("features", []):
+            if _geojson_feature_intersects_bounds(feature, bounds):
+                features.append(feature)
+
+        adprint(f"[AIRSPACE GEOJSON] returning {len(features)} local geojson features")
+        return {
+            "type": "FeatureCollection",
+            "features": features,
+        }
+
+    return {"type": "FeatureCollection", "features": []}
 
 def _airspace_severity(properties: Dict[str, Any]) -> float:
     mode = _airspace_mode(properties)
@@ -284,9 +293,40 @@ def get_global_airspace() -> List[Constraint]:
     global GLOBAL_AIRSPACE
 
     if GLOBAL_AIRSPACE is None:
-        adprint("[AIRSPACE API] loading NorCal/global airspace...")
-        GLOBAL_AIRSPACE = fetch_airspace_constraints(NORCAL_BOUNDS)
-        adprint(f"[AIRSPACE API] loaded {len(GLOBAL_AIRSPACE)} total NorCal constraints")
+        if AIRSPACE_SOURCE == "foreflight":
+            adprint("[AIRSPACE API] loading NorCal/global airspace...")
+            GLOBAL_AIRSPACE = fetch_airspace_constraints(NORCAL_BOUNDS)
+            adprint(f"[AIRSPACE API] loaded {len(GLOBAL_AIRSPACE)} total NorCal constraints")
+
+        elif AIRSPACE_SOURCE == "geojson":
+            adprint("[AIRSPACE GEOJSON] loading local geojson airspace...")
+            zones = load_airspace()
+
+            constraints: List[Constraint] = []
+            for z in zones:
+                constraints.append(
+                    Constraint(
+                        name=z.get("name", "airspace"),
+                        constraint_type="airspace",
+                        mode=z.get("mode", "hard"),
+                        geometry_type="polygon",
+                        polygon_points=z.get("points", []),
+                        floor_alt_ft=0.0,
+                        ceiling_alt_ft=999999.0,
+                        severity=1.0,
+                        metadata={
+                            "source": "geojson",
+                            "hazard_type": z.get("hazard_type", "airspace"),
+                            "type": "RPD",
+                        },
+                    )
+                )
+
+            GLOBAL_AIRSPACE = constraints
+            adprint(f"[AIRSPACE GEOJSON] loaded {len(GLOBAL_AIRSPACE)} total geojson constraints")
+
+        else:
+            raise ValueError(f"Unknown AIRSPACE_SOURCE: {AIRSPACE_SOURCE}")
 
     return GLOBAL_AIRSPACE
 

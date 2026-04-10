@@ -106,24 +106,70 @@ function buildHazardPolygons(points) {
 
 function airspaceStyle(feature) {
   const props = feature?.properties || {};
-  const text = `${props.level || ""} ${props.airspace_type || ""} ${props.type || ""}`.toUpperCase();
+
+  const rawName =
+    props.name ??
+    props.NAME ??
+    props.title ??
+    props.TITLE ??
+    "";
+
+  const rawType =
+    props.type ??
+    props.TYPE ??
+    props.class ??
+    props.CLASS ??
+    props.category ??
+    props.CATEGORY ??
+    props.airspace_type ??
+    props.AIRSPACE_TYPE ??
+    "";
+
+  const rawLevel =
+    props.level ??
+    props.LEVEL ??
+    props.airspace_class ??
+    props.AIRSPACE_CLASS ??
+    "";
+
+  const name = String(rawName).trim().toUpperCase();
+  const type = String(rawType).trim().toUpperCase();
+  const level = String(rawLevel).trim().toUpperCase();
+  const text = `${name} ${level} ${type}`.trim();
 
   let color = "green";
-  if (text.includes("CLASS B") || text.trim() === "B") color = "red";
-  else if (text.includes("CLASS C") || text.trim() === "C") color = "orange";
-  else if (text.includes("CLASS D") || text.trim() === "D") color = "blue";
-  else if (text.includes("CLASS G") || text.trim() === "G") color = "green";
+
+  // special-use first
+  if (text.includes("PROHIBITED") || type === "P") color = "purple";
+  else if (text.includes("RESTRICTED") || type === "R") color = "red";
+  else if (text.includes("DANGER") || type === "D") color = "orange";
+
+  // standard classes
+  else if (text.includes("CLASS B")) color = "red";
+  else if (text.includes("CLASS C")) color = "orange";
+  else if (text.includes("CLASS D")) color = "blue";
+  else if (text.includes("CLASS E")) color = "gold";
+  else if (text.includes("E2")) color = "gold";
+  else if (text.includes("E3")) color = "gold";
+  else if (text.includes("E4")) color = "gold";
+  else if (text.includes("CLASS G")) color = "green";
+  else if (type === "B") color = "red";
+  else if (type === "C") color = "orange";
+  else if (type === "D") color = "blue";
+  else if (type.startsWith("E")) color = "gold";
+  else if (type === "G") color = "green";
 
   return {
     color,
     fillColor: color,
-    fillOpacity: 0.08,
+    fillOpacity: 0.15,
     weight: 2,
   };
 }
 
 function App() {
   const [airspaceGeojson, setAirspaceGeojson] = useState(null);
+  const [airspaceSource, setAirspaceSource] = useState("geojson");
   const [showAirspace, setShowAirspace] = useState(true);
   const [nodes, setNodes] = useState([]);
   const [selectedStart, setSelectedStart] = useState(null);
@@ -144,55 +190,62 @@ function App() {
   const [showGridPoints, setShowGridPoints] = useState(true);
 
   useEffect(() => {
-    fetch("http://127.0.0.1:8000/airspace-geojson")
+  // 🔥 set backend source first
+    fetch(`http://127.0.0.1:8000/set-airspace-source?source=${airspaceSource}`)
+      .then(() => {
+        return fetch("http://127.0.0.1:8000/airspace-geojson");
+      })
       .then((res) => res.json())
       .then((data) => {
         console.log("airspace-geojson:", data);
+        console.log("first airspace properties:", data?.features?.[0]?.properties);
         setAirspaceGeojson(data);
       })
       .catch(() => {
         console.warn("Failed to load airspace geojson.");
         setAirspaceGeojson(null);
       });
-    fetch("http://127.0.0.1:8000/obstacles")
-      .then((res) => res.json())
-      .then((data) => {
-        setObstacles({
-          no_fly_zones: data?.no_fly_zones ?? [],
-          slow_zones: data?.slow_zones ?? [],
-        });
-      })
-      .catch(() => {
-        console.warn("Failed to load obstacles.");
-        setObstacles({
-          no_fly_zones: [],
-          slow_zones: [],
-        });
+  }, [airspaceSource]);
+  useEffect(() => {
+  fetch("http://127.0.0.1:8000/obstacles")
+    .then((res) => res.json())
+    .then((data) => {
+      setObstacles({
+        no_fly_zones: data?.no_fly_zones ?? [],
+        slow_zones: data?.slow_zones ?? [],
       });
+    })
+    .catch(() => {
+      console.warn("Failed to load obstacles.");
+      setObstacles({
+        no_fly_zones: [],
+        slow_zones: [],
+      });
+    });
 
-    fetch("http://127.0.0.1:8000/weather")
-      .then((res) => res.json())
-      .then((data) => {
-        setWeather(data ?? {});
-      })
-      .catch(() => {
-        console.warn("Failed to load weather.");
-        setWeather({});
-      });
+  fetch("http://127.0.0.1:8000/weather")
+    .then((res) => res.json())
+    .then((data) => {
+      setWeather(data ?? {});
+    })
+    .catch(() => {
+      console.warn("Failed to load weather.");
+      setWeather({});
+    });
 
-    fetch("http://127.0.0.1:8000/nodes")
-      .then((res) => res.json())
-      .then((data) => {
-        const nodeArray = Object.entries(data).map(([id, val]) => ({
-          id,
-          ...val,
-        }));
-        setNodes(nodeArray);
-      })
-      .catch(() => {
-        setError("Failed to load nodes from backend.");
-      });
-  }, []);
+  fetch("http://127.0.0.1:8000/nodes")
+    .then((res) => res.json())
+    .then((data) => {
+      const nodeArray = Object.entries(data).map(([id, val]) => ({
+        id,
+        ...val,
+      }));
+      setNodes(nodeArray);
+    })
+    .catch(() => {
+      setError("Failed to load nodes from backend.");
+    });
+}, []);
 
   useEffect(() => {
     if (!selectedStart || !selectedEnd) {
@@ -432,13 +485,55 @@ function App() {
 
                 const popupText = (
                   <Popup>
-                    <b>{props.airspace_type || props.level || "Airspace"}</b>
+                    <b>
+                      {String(
+                        props.name ??
+                        props.NAME ??
+                        props.airspace_type ??
+                        props.AIRSPACE_TYPE ??
+                        props.level ??
+                        props.LEVEL ??
+                        props.type ??
+                        props.TYPE ??
+                        props.class ??
+                        props.CLASS ??
+                        "Airspace"
+                      )}
+                    </b>
                     <br />
-                    Level: {props.level ?? "N/A"}
+                    Level: {
+                      props.level
+                      ?? props.LEVEL
+                      ?? props.airspace_class
+                      ?? props.AIRSPACE_CLASS
+                      ?? props.class
+                      ?? props.CLASS
+                      ?? props.type
+                      ?? props.TYPE
+                      ?? "N/A"
+                    }
                     <br />
-                    Lower: {props.lower_limit ?? "N/A"} {props.lower_limit_reference ?? ""}
+                    Lower: {
+                      props.lower_limit
+                      ?? props.lower
+                      ?? props.LOWER
+                      ?? props.floor
+                      ?? props.FLOOR
+                      ?? props.base
+                      ?? props.BASE
+                      ?? "N/A"
+                    } {props.lower_limit_reference ?? props.lower_ref ?? props.floor_ref ?? ""}
                     <br />
-                    Upper: {props.upper_limit ?? "N/A"} {props.upper_limit_reference ?? ""}
+                    Upper: {
+                      props.upper_limit
+                      ?? props.upper
+                      ?? props.UPPER
+                      ?? props.ceiling
+                      ?? props.CEILING
+                      ?? props.top
+                      ?? props.TOP
+                      ?? "N/A"
+                    } {props.upper_limit_reference ?? props.upper_ref ?? props.ceiling_ref ?? ""}
                   </Popup>
                 );
 
@@ -669,6 +764,17 @@ function App() {
               style={{ marginRight: "8px" }}
             />
             Show airspace
+          </label>
+          <label style={{ display: "block", marginTop: "10px" }}>
+            Airspace Source:
+            <select
+              value={airspaceSource}
+              onChange={(e) => setAirspaceSource(e.target.value)}
+              style={{ display: "block", marginTop: "6px", width: "100%" }}
+            >
+              <option value="foreflight">ForeFlight</option>
+              <option value="geojson">Local GeoJSON</option>
+            </select>
           </label>
           <button
             onClick={() => {
