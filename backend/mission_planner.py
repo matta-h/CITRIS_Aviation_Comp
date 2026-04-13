@@ -10,6 +10,7 @@ from backend.airspace_adapter import get_global_airspace, filter_constraints_by_
 from backend.airspace_feasibility import evaluate_airspace_constraints_for_polyline
 from backend.terrain_feasibility import evaluate_terrain_for_polyline
 from backend.weather_history import fetch_weather_for_nodes
+from backend.altitude_profile import generate_altitude_profile
 
 MAX_DIRECT_MISSION_MILES = 85.0
 EFFECTIVE_AIRSPEED_MPH = 120.0
@@ -26,11 +27,27 @@ EARLY_ACCEPT_DIRECT_SCORE_MIN = 45.0
 DEBUG_MISSION = True
 LEG_CACHE = {}
 
+DEFAULT_CRUISE_ALT_FT = 3500.0
+VERTIPORT_ELEVATION_FT = {
+    "UCSC": 784.0,
+    "UCB": 328.0,
+    "UCD": 120.0,   # estimated 5+1 parking structure rooftop
+    "UCM": 260.0,   # base elevation + estimated future rooftop/pad height
+    "KSQL": 7.0,
+    "KNUQ": 30.0,
+    "KLVK": 371.0,
+    "KCVH": 223.0,
+    "KSNS": 79.0,
+    "KOAR": 135.0,
+}
+
 
 def dprint(msg: str) -> None:
     if DEBUG_MISSION:
         print(msg)
 
+def vertiport_elevation_ft(node_id: str) -> float:
+    return float(VERTIPORT_ELEVATION_FT.get(node_id, 0.0))
 
 def bounds_for_stops(stops: List[str], buffer_deg: float = 0.4) -> Tuple[float, float, float, float]:
     lats = [NODES[s]["lat"] for s in stops]
@@ -46,10 +63,12 @@ def apply_terrain_checks(
     route: dict,
     cruise_alt_ft: float = DEFAULT_CRUISE_ALT_FT,
 ) -> Optional[dict]:
+    altitude_profile = route.get("altitude_profile")
     terrain_eval = evaluate_terrain_for_polyline(
         route["polyline"],
         cruise_alt_ft=cruise_alt_ft,
         clearance_margin_ft=TERRAIN_CLEARANCE_MARGIN_FT,
+        altitude_profile=altitude_profile,
     )
 
     if not terrain_eval["terrain_clearance_ok"]:
@@ -136,6 +155,8 @@ def apply_airspace_checks(
     route: dict,
     stops: List[str],
     cruise_alt_ft: float = DEFAULT_CRUISE_ALT_FT,
+    origin_alt_ft: float = 0.0,
+    destination_alt_ft: float = 0.0,
 ) -> Optional[dict]:
     t0 = time.time()
     bounds = bounds_for_stops(stops)
@@ -147,10 +168,18 @@ def apply_airspace_checks(
     t1 = time.time()
     dprint(f"[AIRSPACE] prepared {len(airspace_constraints)} constraints in {t1 - t0:.2f}s")
 
+    altitude_profile = generate_altitude_profile(
+        route["polyline"],
+        cruise_alt_ft=cruise_alt_ft,
+        origin_alt_ft=origin_alt_ft,
+        destination_alt_ft=destination_alt_ft,
+    )
+
     feasibility = evaluate_airspace_constraints_for_polyline(
         route["polyline"],
         airspace_constraints,
         cruise_alt_ft=cruise_alt_ft,
+        altitude_profile=altitude_profile,
     )
 
     t2 = time.time()
@@ -166,6 +195,8 @@ def apply_airspace_checks(
 
     updated = dict(route)
     updated["airspace_feasibility"] = feasibility
+    updated["altitude_profile"] = altitude_profile
+    updated["max_alt_ft"] = max((p["alt_ft"] for p in altitude_profile), default=cruise_alt_ft)
     return updated
 
 def endpoint_weather_ok(start: str, end: str, departure_time_iso: str) -> bool:
@@ -215,9 +246,20 @@ def build_direct_candidate(
         )
         return None
 
-    route = apply_airspace_checks(route, [start, end], cruise_alt_ft=cruise_alt_ft)
+    route = apply_airspace_checks(
+        route,
+        [start, end],
+        cruise_alt_ft=cruise_alt_ft,
+        origin_alt_ft=vertiport_elevation_ft(start),
+        destination_alt_ft=vertiport_elevation_ft(end),
+    )
     if not route:
         dprint("[MISSION] direct rejected by airspace")
+        return None
+
+    route = apply_terrain_checks(route, cruise_alt_ft=cruise_alt_ft)
+    if not route:
+        dprint("[MISSION] direct rejected by terrain")
         return None
 
     soft_conflicts = route["airspace_feasibility"]["soft_conflicts"]
@@ -291,14 +333,36 @@ def build_exchange_candidate(
         )
         return None
 
-    leg1_checked = apply_airspace_checks(leg1, [start, exchange], cruise_alt_ft=cruise_alt_ft)
+    leg1_checked = apply_airspace_checks(
+        leg1,
+        [start, exchange],
+        cruise_alt_ft=cruise_alt_ft,
+        origin_alt_ft=vertiport_elevation_ft(start),
+        destination_alt_ft=vertiport_elevation_ft(exchange),
+    )
     if not leg1_checked:
         dprint("[MISSION] exchange rejected by airspace on leg1")
         return None
 
-    leg2_checked = apply_airspace_checks(leg2, [exchange, end], cruise_alt_ft=cruise_alt_ft)
+    leg1_checked = apply_terrain_checks(leg1_checked, cruise_alt_ft=cruise_alt_ft)
+    if not leg1_checked:
+        dprint("[MISSION] exchange rejected by terrain on leg1")
+        return None
+
+    leg2_checked = apply_airspace_checks(
+        leg2,
+        [exchange, end],
+        cruise_alt_ft=cruise_alt_ft,
+        origin_alt_ft=vertiport_elevation_ft(exchange),
+        destination_alt_ft=vertiport_elevation_ft(end),
+    )
     if not leg2_checked:
         dprint("[MISSION] exchange rejected by airspace on leg2")
+        return None
+
+    leg2_checked = apply_terrain_checks(leg2_checked, cruise_alt_ft=cruise_alt_ft)
+    if not leg2_checked:
+        dprint("[MISSION] exchange rejected by terrain on leg2")
         return None
 
     total_distance = leg1_checked["total_distance_miles"] + leg2_checked["total_distance_miles"]
@@ -338,6 +402,8 @@ def build_exchange_candidate(
             "total_time_minutes": round(total_time, 1),
             "total_cost": round(score, 2),
             "num_legs": len(combined_legs),
+            "altitude_profile_leg1": leg1_checked.get("altitude_profile", []),
+            "altitude_profile_leg2": leg2_checked.get("altitude_profile", []),
             "exchange_stop": exchange,
             "airspace_feasibility": {
                 "is_feasible": True,

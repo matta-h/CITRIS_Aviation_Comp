@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Tuple, Dict, Any, Set
+from typing import List, Tuple, Dict, Any, Set, Optional
 
 from backend.constraint_model import Constraint
 
@@ -55,6 +55,7 @@ def evaluate_airspace_constraints_for_polyline(
     polyline: List[List[float]],
     constraints: List[Constraint],
     cruise_alt_ft: float = DEFAULT_CRUISE_ALT_FT,
+    altitude_profile: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Check a lateral route polyline against altitude-aware airspace constraints.
@@ -85,6 +86,10 @@ def evaluate_airspace_constraints_for_polyline(
         if idx < ENDPOINT_TOLERANCE_POINTS or idx > n_points - ENDPOINT_TOLERANCE_POINTS:
             continue
 
+        point_alt_ft = cruise_alt_ft
+        if altitude_profile and idx < len(altitude_profile):
+            point_alt_ft = altitude_profile[idx].get("alt_ft", cruise_alt_ft)
+
         for c in constraints:
             if c.geometry_type != "polygon" or not c.polygon_points:
                 continue
@@ -92,7 +97,7 @@ def evaluate_airspace_constraints_for_polyline(
             if not point_in_polygon(lat, lon, c.polygon_points):
                 continue
 
-            if not _altitude_conflicts(cruise_alt_ft, c.floor_alt_ft, c.ceiling_alt_ft):
+            if not _altitude_conflicts(point_alt_ft, c.floor_alt_ft, c.ceiling_alt_ft):
                 continue
 
             conflict_info = {
@@ -101,6 +106,7 @@ def evaluate_airspace_constraints_for_polyline(
                 "mode": c.mode,
                 "floor_alt_ft": c.floor_alt_ft,
                 "ceiling_alt_ft": c.ceiling_alt_ft,
+                "route_alt_ft": point_alt_ft,
                 "severity": c.severity,
                 "metadata": c.metadata,
             }
