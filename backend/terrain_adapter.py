@@ -1,45 +1,47 @@
 from __future__ import annotations
 
 import math
+import glob
 from typing import List, Dict, Any, Tuple, Optional
 
-import requests
+import rasterio
 
+DEM_FILES = glob.glob("backend/terrain_data/*.tif")
+DEM_DATASETS = [rasterio.open(path) for path in DEM_FILES]
 
-USGS_EPQS_URL = "https://epqs.nationalmap.gov/v1/json"
-DEFAULT_TIMEOUT = 20
+print(f"[TERRAIN] Loaded {len(DEM_DATASETS)} DEM tiles")
 
 
 def sample_elevation_ft(lat: float, lon: float) -> Optional[float]:
     """
-    Query terrain elevation in feet for a single point.
-    Returns None if unavailable.
+    Read terrain elevation from local DEM GeoTIFF tiles.
+    Returns elevation in feet.
     """
-    params = {
-        "x": lon,
-        "y": lat,
-        "units": "Feet",
-        "wkid": "4326",
-        "includeDate": "false",
-    }
+    for ds in DEM_DATASETS:
+        bounds = ds.bounds
 
-    try:
-        response = requests.get(USGS_EPQS_URL, params=params, timeout=DEFAULT_TIMEOUT)
-        response.raise_for_status()
-        payload = response.json()
+        if not (bounds.left <= lon <= bounds.right and bounds.bottom <= lat <= bounds.top):
+            continue
 
-        value = (
-            payload.get("value")
-            or payload.get("elevation")
-            or payload.get("Elevation")
-        )
+        try:
+            row, col = ds.index(lon, lat)
+            band = ds.read(1)
 
-        if value is None:
-            return None
+            if row < 0 or col < 0 or row >= band.shape[0] or col >= band.shape[1]:
+                continue
 
-        return float(value)
-    except Exception:
-        return None
+            value = band[row, col]
+
+            if ds.nodata is not None and value == ds.nodata:
+                continue
+
+            # USGS DEM GeoTIFF elevations are typically in meters
+            return float(value) * 3.28084
+
+        except Exception:
+            continue
+
+    return None
 
 
 def _miles_per_degree_lon(lat_deg: float) -> float:

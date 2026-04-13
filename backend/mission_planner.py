@@ -16,8 +16,8 @@ MAX_DIRECT_MISSION_MILES = 85.0
 EFFECTIVE_AIRSPEED_MPH = 120.0
 EXCHANGE_DELAY_MIN = 30.0
 
-TERRAIN_CLEARANCE_MARGIN_FT = 1000
-DEFAULT_CRUISE_ALT_FT = 3500.0
+TERRAIN_CLEARANCE_MARGIN_FT = 300
+DEFAULT_CRUISE_ALT_FT = 4500.0
 AIRSPACE_SOFT_PENALTY_MIN = 0.5
 CORRIDOR_PENALTY_PER_MILE_MIN = 1.5
 
@@ -27,7 +27,6 @@ EARLY_ACCEPT_DIRECT_SCORE_MIN = 45.0
 DEBUG_MISSION = True
 LEG_CACHE = {}
 
-DEFAULT_CRUISE_ALT_FT = 3500.0
 VERTIPORT_ELEVATION_FT = {
     "UCSC": 784.0,
     "UCB": 328.0,
@@ -425,7 +424,15 @@ def build_exchange_candidate(
 
 def candidate_exchange_nodes(start: str, end: str) -> List[str]:
     airport_ids = ["KSQL", "KLVK", "KCVH", "KSNS", "KOAR", "KNUQ"]
-    return [node_id for node_id in airport_ids if node_id not in {start, end}]
+    candidates = [node_id for node_id in airport_ids if node_id not in {start, end}]
+
+    return sorted(
+        candidates,
+        key=lambda node_id: (
+            distance_between(NODES[start], NODES[node_id]) +
+            distance_between(NODES[node_id], NODES[end])
+        ),
+    )
 
 def _finalize_selected_candidate(best: dict, raw_direct_distance: float, cruise_alt_ft: float, departure_time_iso: str) -> dict:
     best_route = best["route"]
@@ -499,7 +506,9 @@ def plan_mission(
     exchange_nodes = candidate_exchange_nodes(start, end)
     dprint(f"[MISSION] exchange candidates: {exchange_nodes}")
 
-    for mid in exchange_nodes:
+    max_exchange_candidates = 3
+
+    for mid in exchange_nodes[:max_exchange_candidates]:
         exchange = build_exchange_candidate(
             start,
             mid,
@@ -509,6 +518,20 @@ def plan_mission(
         )
         if exchange:
             candidates.append(exchange)
+
+            # Early accept a very good exchange route
+            if exchange["score"] <= 105:
+                dprint(
+                    f"[MISSION] early accept exchange via {mid}: "
+                    f"score={exchange['score']:.2f}"
+                )
+                dprint(f"[MISSION] completed in {time.time() - t0:.2f}s")
+                return _finalize_selected_candidate(
+                    exchange,
+                    raw_direct_distance,
+                    cruise_alt_ft,
+                    departure_time_iso,
+                )
 
     if not candidates:
         dprint("[MISSION] no feasible candidates")

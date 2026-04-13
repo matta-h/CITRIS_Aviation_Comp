@@ -15,6 +15,7 @@ import "leaflet-defaulticon-compatibility";
 import "leaflet-defaulticon-compatibility/dist/leaflet-defaulticon-compatibility.css";
 import RightPanel from "./components/RightPanel";
 import BottomToolbar from "./components/BottomToolbar";
+import LeftPanel from "./components/LeftPanel";
 import { point, featureCollection, buffer, union } from "@turf/turf";
 
 function milesToMeters(miles) {
@@ -177,6 +178,9 @@ function App() {
   const [nodes, setNodes] = useState([]);
   const [selectedStart, setSelectedStart] = useState(null);
   const [selectedEnd, setSelectedEnd] = useState(null);
+  const [pendingStart, setPendingStart] = useState("");
+  const [pendingEnd, setPendingEnd] = useState("");
+  const [activeFlights, setActiveFlights] = useState([]);
   const [routeData, setRouteData] = useState(null);
   const [error, setError] = useState("");
   const [isRouting, setIsRouting] = useState(false);
@@ -314,9 +318,32 @@ function App() {
         return res.json();
       })
       .then((data) => {
+        const newFlight = {
+          id: `flight-${Date.now()}`,
+          start: selectedStart,
+          end: selectedEnd,
+          routeData: data,
+          risk:
+            data?.route_class === "orange"
+              ? "High"
+              : data?.route_class === "yellow" || data?.route_class === "detour"
+                ? "Medium"
+                : "Low",
+          distanceText: data?.total_distance_miles
+            ? `${Number(data.total_distance_miles).toFixed(1)} mi`
+            : "—",
+          etaText:
+            data?.estimated_time_min != null
+              ? `${Math.round(data.estimated_time_min)} min`
+              : data?.score != null
+                ? `${Math.round(data.score)} min`
+                : "—",
+        };
+
         setRouteData(data);
         setSelectedType("flight");
         setSelectedNode(null);
+        setActiveFlights((prev) => [newFlight, ...prev]);
         setError("");
         setIsRouting(false);
       })
@@ -412,25 +439,51 @@ function App() {
     const node = nodeMap[nodeId] || null;
     setSelectedType("port");
     setSelectedNode(node);
+  };
 
-    if (!selectedStart) {
+  /*   const handleNodeSelect = (nodeId) => {
+      const node = nodeMap[nodeId] || null;
+      setSelectedType("port");
+      setSelectedNode(node);
+  
+      if (!selectedStart) {
+        setSelectedStart(nodeId);
+        setSelectedEnd(null);
+        setRouteData(null);
+        setError("");
+        return;
+      }
+  
+      if (!selectedEnd) {
+        if (nodeId === selectedStart) return;
+        setSelectedEnd(nodeId);
+        return;
+      }
+  
       setSelectedStart(nodeId);
       setSelectedEnd(null);
       setRouteData(null);
       setError("");
-      return;
-    }
+    }; */
 
-    if (!selectedEnd) {
-      if (nodeId === selectedStart) return;
-      setSelectedEnd(nodeId);
-      return;
-    }
+  const handleCreateFlight = () => {
+    if (!pendingStart || !pendingEnd || pendingStart === pendingEnd) return;
 
-    setSelectedStart(nodeId);
-    setSelectedEnd(null);
-    setRouteData(null);
+    setSelectedStart(pendingStart);
+    setSelectedEnd(pendingEnd);
+    setPendingStart("");
+    setPendingEnd("");
     setError("");
+  };
+
+  const handleSelectFlight = (flight) => {
+    setSelectedType("flight");
+    setSelectedNode(null);
+    setRouteData(flight.routeData || null);
+  };
+
+  const handleDeleteFlight = (flightId) => {
+    setActiveFlights((prev) => prev.filter((flight) => flight.id !== flightId));
   };
 
   const clearSelection = () => {
@@ -443,6 +496,18 @@ function App() {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100%" }}>
       <div style={{ display: "flex", flex: 1 }}>
+        <LeftPanel
+          nodes={nodes}
+          activeFlights={activeFlights}
+          pendingStart={pendingStart}
+          pendingEnd={pendingEnd}
+          setPendingStart={setPendingStart}
+          setPendingEnd={setPendingEnd}
+          onCreateFlight={handleCreateFlight}
+          onSelectFlight={handleSelectFlight}
+          onDeleteFlight={handleDeleteFlight}
+        />
+
         <div style={{ flex: 1, position: "relative" }}>
           <MapContainer
             center={[37.5, -121.5]}

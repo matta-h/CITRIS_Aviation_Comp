@@ -45,22 +45,52 @@ def altitude_at_distance(
 
     dist_from_end = total_distance_miles - dist_along_miles
 
+    departure_transition_alt_ft = min(cruise_alt_ft, origin_alt_ft + 1500.0)
+    arrival_transition_alt_ft = min(cruise_alt_ft, destination_alt_ft + 1500.0)
+
+    vertical_transition_miles = 0.15
+
+    # Departure VTOL lift: near-vertical climb to safer transition altitude
+    if dist_along_miles < vertical_transition_miles:
+        frac = max(0.0, min(1.0, dist_along_miles / vertical_transition_miles))
+        return origin_alt_ft + frac * (departure_transition_alt_ft - origin_alt_ft)
+
+    # Forward climb from transition altitude to cruise altitude
     if dist_along_miles < climb_distance_miles:
-        frac = max(0.0, min(1.0, dist_along_miles / max(climb_distance_miles, 1e-6)))
-        return origin_alt_ft + frac * (cruise_alt_ft - origin_alt_ft)
+        frac = max(
+            0.0,
+            min(
+                1.0,
+                (dist_along_miles - vertical_transition_miles)
+                / max(climb_distance_miles - vertical_transition_miles, 1e-6),
+            ),
+        )
+        return departure_transition_alt_ft + frac * (cruise_alt_ft - departure_transition_alt_ft)
+
+    # Arrival VTOL descent: stay higher until near destination, then descend
+    if dist_from_end < vertical_transition_miles:
+        frac = max(0.0, min(1.0, dist_from_end / vertical_transition_miles))
+        return destination_alt_ft + frac * (arrival_transition_alt_ft - destination_alt_ft)
 
     if dist_from_end < descent_distance_miles:
-        frac = max(0.0, min(1.0, dist_from_end / max(descent_distance_miles, 1e-6)))
-        return destination_alt_ft + frac * (cruise_alt_ft - destination_alt_ft)
+        frac = max(
+            0.0,
+            min(
+                1.0,
+                (dist_from_end - vertical_transition_miles)
+                / max(descent_distance_miles - vertical_transition_miles, 1e-6),
+            ),
+        )
+        return arrival_transition_alt_ft + frac * (cruise_alt_ft - arrival_transition_alt_ft)
 
     return cruise_alt_ft
 
 
 def generate_altitude_profile(
     polyline: List[List[float]],
-    cruise_alt_ft: float = 3500.0,
-    climb_distance_miles: float = 5.0,
-    descent_distance_miles: float = 5.0,
+    cruise_alt_ft: float = 4500.0,
+    climb_distance_miles: float = 2.0,
+    descent_distance_miles: float = 2.0,
     origin_alt_ft: float = 0.0,
     destination_alt_ft: float = 0.0,
 ) -> List[Dict[str, Any]]:
