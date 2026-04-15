@@ -322,6 +322,8 @@ function App() {
           start: selectedStart,
           end: selectedEnd,
           routeData: data,
+
+          // UI info
           risk:
             data?.route_class === "orange"
               ? "High"
@@ -337,6 +339,13 @@ function App() {
               : data?.score != null
                 ? `${Math.round(data.score)} min`
                 : "—",
+
+          // 🔥 NEW SIM STATE
+          progress: 0,              // 0 → 1 along route
+          status: "waiting_departure",
+          speed_mph: 120,           // adjustable later
+          //lastUpdateHour: currentHour,
+          departureHour: currentHour,
         };
 
         setRouteData(data);
@@ -352,6 +361,39 @@ function App() {
         setIsRouting(false);
       });
   }, [selectedStart, selectedEnd, routeRequestTime]);
+
+  useEffect(() => {
+    setActiveFlights((prevFlights) =>
+      prevFlights.map((flight) => {
+        const totalDistance = flight.routeData?.total_distance_miles || 1;
+        const speed = flight.speed_mph || 120;
+
+        const elapsedHours = currentHour - flight.departureHour;
+
+        if (elapsedHours < 0) {
+          return {
+            ...flight,
+            progress: 0,
+            status: "waiting_departure",
+          };
+        }
+
+        const traveledMiles = elapsedHours * speed;
+        const newProgress = Math.max(0, Math.min(traveledMiles / totalDistance, 1));
+
+        return {
+          ...flight,
+          progress: newProgress,
+          status:
+            newProgress <= 0
+              ? "waiting_departure"
+              : newProgress >= 1
+                ? "arrived"
+                : "enroute",
+        };
+      })
+    );
+  }, [currentHour]);
 
   useEffect(() => {
     const iso = `${selectedDate}T${String(currentHour).padStart(2, "0")}:00`;
@@ -560,7 +602,26 @@ function App() {
                 </Popup>
               </Circle>
             ))}
+            {showFlights &&
+              activeFlights.map((flight) => {
+                const poly = flight.routeData?.polyline;
+                if (!poly || poly.length < 2) return null;
 
+                const idx = Math.floor(flight.progress * (poly.length - 1));
+                const pos = poly[idx];
+
+                return (
+                  <Marker key={flight.id} position={pos}>
+                    <Tooltip>
+                      <b>{flight.start} → {flight.end}</b>
+                      <br />
+                      Status: {flight.status}
+                      <br />
+                      Progress: {(flight.progress * 100).toFixed(0)}%
+                    </Tooltip>
+                  </Marker>
+                );
+              })}
             {showGridPoints &&
               weatherGrid.map((point, idx) => {
                 const wx = point.weather || {};
