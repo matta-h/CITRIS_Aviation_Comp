@@ -68,8 +68,7 @@ def _airspace_mode(properties: Dict[str, Any]) -> str:
     generic_type = str(properties.get("type", "")).upper()
 
     hard_tokens = {
-        "B", "C", "D",
-        "RESTRICTED", "PROHIBITED", "TFR", "NSA", "MOA",
+        "RESTRICTED", "PROHIBITED", "TFR", "NSA", "MOA", "P", "R"
     }
 
     if level in hard_tokens:
@@ -335,13 +334,18 @@ def get_global_airspace() -> List[Constraint]:
             for z in zones:
                 airspace_class = str(z.get("class", "")).upper()
 
-                mode = z.get("mode", "soft")
-                if airspace_class in {"P"}:
+                mode = "soft"
+                if airspace_class in {"P", "R"}:
                     mode = "hard"
-                elif airspace_class in {"R"}:
-                    mode = "soft"  # allow with penalty instead of rejection
 
-                severity = 1.0 if mode == "hard" else 0.5
+                if airspace_class == "B":
+                    severity = 2.0
+                elif airspace_class == "C":
+                    severity = 1.5
+                elif airspace_class == "D":
+                    severity = 1.0
+                else:
+                    severity = 0.5
 
                 constraints.append(
                     Constraint(

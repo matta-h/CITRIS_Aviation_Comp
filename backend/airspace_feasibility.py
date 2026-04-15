@@ -31,6 +31,25 @@ def point_in_polygon(lat: float, lon: float, polygon_points: List[Tuple[float, f
 
     return inside
 
+def segment_hits_polygon(
+    a_lat: float,
+    a_lon: float,
+    b_lat: float,
+    b_lon: float,
+    polygon_points: List[Tuple[float, float]],
+    samples: int = 7,
+) -> bool:
+    """
+    Approximate segment/polygon intersection by sampling points along the segment.
+    Good enough for current routing density and much better than endpoint-only checks.
+    """
+    for i in range(samples + 1):
+        t = i / samples
+        lat = a_lat + t * (b_lat - a_lat)
+        lon = a_lon + t * (b_lon - a_lon)
+        if point_in_polygon(lat, lon, polygon_points):
+            return True
+    return False
 
 def _altitude_conflicts(route_alt_ft: float, floor_alt_ft: float, ceiling_alt_ft: float) -> bool:
     """
@@ -79,6 +98,7 @@ def evaluate_airspace_constraints_for_polyline(
 
     # === allow tolerance near endpoints (airport ingress/egress) ===
     ENDPOINT_TOLERANCE_POINTS = 1  # first/last N points are exempt
+    endpoint_skip_miles = 3
     n_points = len(polyline)
 
     for idx in range(1, len(polyline)):
@@ -95,9 +115,13 @@ def evaluate_airspace_constraints_for_polyline(
         segment_length_miles = (dx * dx + dy * dy) ** 0.5
 
         # Skip constraint enforcement near endpoints
-        if idx < ENDPOINT_TOLERANCE_POINTS or idx > n_points - ENDPOINT_TOLERANCE_POINTS:
-            continue
+        # compute distance along route
+        distance_along = idx * segment_length_miles
+        distance_remaining = (n_points - idx) * segment_length_miles
 
+        if distance_along < endpoint_skip_miles or distance_remaining < endpoint_skip_miles:
+            continue
+        
         point_alt_ft = cruise_alt_ft
         if altitude_profile and idx < len(altitude_profile):
             point_alt_ft = altitude_profile[idx].get("alt_ft", cruise_alt_ft)
@@ -106,7 +130,7 @@ def evaluate_airspace_constraints_for_polyline(
             if c.geometry_type != "polygon" or not c.polygon_points:
                 continue
 
-            if not point_in_polygon(lat, lon, c.polygon_points):
+            if not segment_hits_polygon(prev_lat, prev_lon, lat, lon, c.polygon_points):
                 continue
 
             if not _altitude_conflicts(point_alt_ft, c.floor_alt_ft, c.ceiling_alt_ft):

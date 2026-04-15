@@ -178,6 +178,7 @@ function App() {
   const [nodes, setNodes] = useState([]);
   const [selectedStart, setSelectedStart] = useState(null);
   const [selectedEnd, setSelectedEnd] = useState(null);
+  const [routeRequestTime, setRouteRequestTime] = useState(null);
   const [pendingStart, setPendingStart] = useState("");
   const [pendingEnd, setPendingEnd] = useState("");
   const [activeFlights, setActiveFlights] = useState([]);
@@ -299,13 +300,11 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!selectedStart || !selectedEnd) {
-      setRouteData(null);
+    if (!selectedStart || !selectedEnd || !routeRequestTime) {
       return;
     }
 
-    const effectiveRouteTime = requestedGridTime ?? gridTime;
-    const url = `http://127.0.0.1:8000/route?start=${selectedStart}&end=${selectedEnd}&departure_time=${encodeURIComponent(effectiveRouteTime)}`;
+    const url = `http://127.0.0.1:8000/route?start=${selectedStart}&end=${selectedEnd}&departure_time=${encodeURIComponent(routeRequestTime)}`;
 
     setIsRouting(true);
     setError("");
@@ -352,7 +351,7 @@ function App() {
         setError(err.message || "Failed to fetch route.");
         setIsRouting(false);
       });
-  }, [selectedStart, selectedEnd, requestedGridTime]);
+  }, [selectedStart, selectedEnd, routeRequestTime]);
 
   useEffect(() => {
     const iso = `${selectedDate}T${String(currentHour).padStart(2, "0")}:00`;
@@ -469,8 +468,11 @@ function App() {
   const handleCreateFlight = () => {
     if (!pendingStart || !pendingEnd || pendingStart === pendingEnd) return;
 
+    const requestTime = requestedGridTime ?? gridTime;
+
     setSelectedStart(pendingStart);
     setSelectedEnd(pendingEnd);
+    setRouteRequestTime(requestTime);
     setPendingStart("");
     setPendingEnd("");
     setError("");
@@ -489,6 +491,7 @@ function App() {
   const clearSelection = () => {
     setSelectedStart(null);
     setSelectedEnd(null);
+    setRouteRequestTime(null);
     setRouteData(null);
     setError("");
   };

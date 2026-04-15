@@ -160,13 +160,7 @@ def fetch_weather_grid_batched(target_time_iso: str) -> List[Dict]:
         status_code = exc.response.status_code if exc.response is not None else None
 
         if status_code == 429:
-            fallback = get_latest_cached_grid()
-            if fallback is not None:
-                append_log(f"429 from Open-Meteo for {target_time_iso}; using latest cached grid instead")
-                HOURLY_GRID_CACHE[target_time_iso] = list(fallback)
-                return list(fallback)
-
-            append_log(f"429 from Open-Meteo for {target_time_iso}; no cached fallback available")
+            append_log(f"Weather fetch failed for {target_time_iso}: {exc}")
             return []
 
         raise
@@ -174,8 +168,8 @@ def fetch_weather_grid_batched(target_time_iso: str) -> List[Dict]:
         fallback = get_latest_cached_grid()
         if fallback is not None:
             append_log(f"Weather fetch failed for {target_time_iso}: {exc}; using latest cached grid instead")
-            HOURLY_GRID_CACHE[target_time_iso] = fallback
-            return fallback
+            if results:
+                HOURLY_GRID_CACHE[target_time_iso] = results
         raise
 
     # If only one coordinate is returned, Open-Meteo may return a dict instead of a list.
@@ -272,7 +266,13 @@ def _preload_weather_day_worker(date_str: str) -> None:
                 PRELOAD_STATUS["current_hour"] = timestamp
             append_log(f"Loading {timestamp}")
 
-            DAY_GRID_CACHE[date_str][timestamp] = fetch_weather_grid_batched(timestamp)
+            data = fetch_weather_grid_batched(timestamp)
+
+            if data:
+                DAY_GRID_CACHE[date_str][timestamp] = data
+                HOURLY_GRID_CACHE[timestamp] = data
+            else:
+                append_log(f"Skipped caching {timestamp} due to empty data")
             HOURLY_GRID_CACHE[timestamp] = DAY_GRID_CACHE[date_str][timestamp]
 
             with PRELOAD_LOCK:
