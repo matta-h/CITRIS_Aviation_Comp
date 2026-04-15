@@ -5,25 +5,33 @@ export default function BottomToolbar({
   setStartHour,
   endHour,
   setEndHour,
-  currentHour,
-  setCurrentHour,
+  currentTimeMinutes,
+  setCurrentTimeMinutes,
   showWeather,
   setShowWeather,
   showPopulation,
   setShowPopulation,
   showFlights,
   setShowFlights,
-
   showHazardRegions,
   setShowHazardRegions,
-
   initialize,
   isPreloading,
+  // Sim clock
+  isPlaying,
+  setIsPlaying,
+  simSpeed,
+  setSimSpeed,
 }) {
+  const h = Math.floor(currentTimeMinutes / 60);
+  const m = currentTimeMinutes % 60;
+
+  const SPEED_OPTIONS = [1, 2, 5, 10, 30, 60];
+
   return (
     <div
       style={{
-        height: "110px",
+        height: "120px",
         background: "#031f47",
         borderTop: "2px solid #0c3f73",
         padding: "10px 16px",
@@ -34,6 +42,7 @@ export default function BottomToolbar({
         fontFamily: "Arial, sans-serif",
       }}
     >
+      {/* Top row: date/time config + toggles */}
       <div
         style={{
           display: "flex",
@@ -51,7 +60,7 @@ export default function BottomToolbar({
             style={{ padding: "4px", borderRadius: "6px" }}
           />
 
-          <div>
+          <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
             Start:
             <input
               type="number"
@@ -73,7 +82,6 @@ export default function BottomToolbar({
               onChange={(e) => setEndHour(Number(e.target.value))}
               style={{ width: "50px", marginLeft: "6px" }}
             />
-
             <button
               onClick={initialize}
               style={{
@@ -110,15 +118,6 @@ export default function BottomToolbar({
             />
             Weather
           </label>
-          {/*           <label>
-            <input
-              type="checkbox"
-              checked={usePreloadedWeather}
-              onChange={() => setUsePreloadedWeather(!usePreloadedWeather)}
-              style={{ marginRight: "6px" }}
-            />
-            Preloaded Mode
-          </label> */}
           <label>
             <input
               type="checkbox"
@@ -128,7 +127,6 @@ export default function BottomToolbar({
             />
             Population
           </label>
-
           <label>
             <input
               type="checkbox"
@@ -141,19 +139,70 @@ export default function BottomToolbar({
         </div>
       </div>
 
+      {/* Bottom row: timeline scrubber + play controls */}
       <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-        <span>{currentHour}:00</span>
 
+        {/* Play / Pause */}
+        <button
+          onClick={() => setIsPlaying(!isPlaying)}
+          style={{
+            padding: "5px 14px",
+            borderRadius: "6px",
+            border: "none",
+            background: isPlaying ? "#e53935" : "#43a047",
+            color: "white",
+            fontWeight: "bold",
+            cursor: "pointer",
+            minWidth: "64px",
+            fontSize: "13px",
+          }}
+        >
+          {isPlaying ? "⏸ Pause" : "▶ Play"}
+        </button>
+
+        {/* Speed selector */}
+        <div style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "13px" }}>
+          <span style={{ opacity: 0.75 }}>Speed:</span>
+          {SPEED_OPTIONS.map((s) => (
+            <button
+              key={s}
+              onClick={() => setSimSpeed(s)}
+              style={{
+                padding: "3px 8px",
+                borderRadius: "5px",
+                border: "1px solid rgba(255,255,255,0.2)",
+                background: simSpeed === s ? "#1e6ca1" : "transparent",
+                color: "white",
+                cursor: "pointer",
+                fontSize: "12px",
+                fontWeight: simSpeed === s ? "bold" : "normal",
+              }}
+            >
+              {s}×
+            </button>
+          ))}
+        </div>
+
+        {/* Current time display */}
+        <span style={{ fontWeight: "bold", minWidth: "50px", textAlign: "right" }}>
+          {String(h).padStart(2, "0")}:{String(m).padStart(2, "0")}
+        </span>
+
+        {/* Scrubber */}
         <input
           type="range"
-          min={startHour}
-          max={endHour}
-          value={currentHour}
-          onChange={(e) => setCurrentHour(Number(e.target.value))}
+          min={startHour * 60}
+          max={endHour * 60}
+          step={1}
+          value={currentTimeMinutes}
+          onChange={(e) => {
+            setIsPlaying(false); // pause when scrubbing manually
+            setCurrentTimeMinutes(Number(e.target.value));
+          }}
           style={{ flex: 1 }}
         />
 
-        <span>{endHour}:00</span>
+        <span style={{ opacity: 0.7 }}>{endHour}:00</span>
       </div>
     </div>
   );

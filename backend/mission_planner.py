@@ -170,6 +170,8 @@ def apply_airspace_checks(
     altitude_profile = generate_altitude_profile(
         route["polyline"],
         cruise_alt_ft=cruise_alt_ft,
+        climb_distance_miles=4.0,
+        descent_distance_miles=4.0,
         origin_alt_ft=origin_alt_ft,
         destination_alt_ft=destination_alt_ft,
     )
@@ -366,6 +368,14 @@ def build_exchange_candidate(
 
     total_distance = leg1_checked["total_distance_miles"] + leg2_checked["total_distance_miles"]
     total_time = leg1_checked["total_time_minutes"] + leg2_checked["total_time_minutes"] + EXCHANGE_DELAY_MIN
+    # Initialize flight_data with proper structure
+    flight_data = {
+        "leg1Polyline": leg1_checked.get("polyline", []),
+        "leg2Polyline": leg2_checked.get("polyline", []),
+        "exchangeDelayMinutes": EXCHANGE_DELAY_MIN,
+        "leg1Minutes": leg1_checked["total_time_minutes"],
+        "leg2Minutes": leg2_checked["total_time_minutes"],
+    }
 
     combined_polyline = leg1_checked["polyline"] + leg2_checked["polyline"][1:]
     combined_raw_polyline = leg1_checked["raw_polyline"] + leg2_checked["raw_polyline"][1:]
@@ -393,31 +403,27 @@ def build_exchange_candidate(
         "mission_type": "exchange",
         "stops": [start, exchange, end],
         "route": {
-            "path": combined_path,
-            "polyline": combined_polyline,
-            "raw_polyline": combined_raw_polyline,
-            "legs": combined_legs,
+            "polyline": flight_data["leg1Polyline"] + flight_data["leg2Polyline"][1:],
+            "legs": leg1_checked["legs"] + leg2_checked["legs"],
             "total_distance_miles": round(total_distance, 2),
-            "total_time_minutes": round(total_time, 1),
-            "total_cost": round(score, 2),
-            "num_legs": len(combined_legs),
+            "total_time_minutes": round(
+                flight_data["leg1Minutes"] + flight_data["exchangeDelayMinutes"] + flight_data["leg2Minutes"], 1
+            ),
             "altitude_profile_leg1": leg1_checked.get("altitude_profile", []),
             "altitude_profile_leg2": leg2_checked.get("altitude_profile", []),
-            "exchange_stop": exchange,
             "airspace_feasibility": {
                 "is_feasible": True,
                 "hard_conflicts": [],
-                "soft_conflicts": soft_conflicts,
-                "suggested_penalty": round(airspace_penalty, 2),
+                "soft_conflicts": leg1_checked["airspace_feasibility"]["soft_conflicts"]
+                                + leg2_checked["airspace_feasibility"]["soft_conflicts"],
             },
+            "exchange_stop": exchange,
             "selection_notes": {
                 "exchange_delay_min": EXCHANGE_DELAY_MIN,
-                "airspace_penalty_min": round(airspace_penalty, 2),
-                "corridor_penalty_min": round(corridor_penalty, 2),
             },
         },
         "num_exchanges": 1,
-        "score": score,
+        "score": total_time + airspace_penalty + corridor_penalty,
         "exchange_required": True,
     }
 
@@ -450,6 +456,7 @@ def _finalize_selected_candidate(best: dict, raw_direct_distance: float, cruise_
     except:
         arrival_time = None
 
+    
     return {
         **best_route,
         "selected_mission_type": best["mission_type"],

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Dict, Optional, Tuple, List
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 
 # -----------------------------
@@ -109,6 +109,24 @@ def fetch_historical_weather_day_for_node(node: dict, day_str: str) -> dict:
 # -----------------------------
 # MAIN HISTORICAL FETCH
 # -----------------------------
+def floor_hour_iso(target_time_iso: str) -> str:
+    dt = datetime.fromisoformat(target_time_iso)
+    return f"{dt.date().isoformat()}T{dt.hour:02d}:00"
+
+
+def ceil_hour_iso(target_time_iso: str) -> str:
+    dt = datetime.fromisoformat(target_time_iso)
+    if dt.minute == 0:
+        return f"{dt.date().isoformat()}T{dt.hour:02d}:00"
+
+    dt2 = dt.replace(minute=0) + timedelta(hours=1)
+    return f"{dt2.date().isoformat()}T{dt2.hour:02d}:00"
+
+
+def interpolation_fraction(target_time_iso: str) -> float:
+    dt = datetime.fromisoformat(target_time_iso)
+    return dt.minute / 60.0
+
 def fetch_historical_weather_for_node(node: dict, target_time_iso: str) -> dict:
     target_dt = datetime.fromisoformat(target_time_iso)
     day_str = target_dt.date().isoformat()
@@ -169,15 +187,50 @@ def fetch_historical_weather_for_node(node: dict, target_time_iso: str) -> dict:
 # -----------------------------
 # MULTI-NODE FETCH
 # -----------------------------
+def interpolate_node_weather(a: dict, b: dict, target_time_iso: str, alpha: float) -> dict:
+    wind = a.get("wind_speed_mph", 0.0) + alpha * (b.get("wind_speed_mph", 0.0) - a.get("wind_speed_mph", 0.0))
+    gust = a.get("wind_gusts_mph", 0.0) + alpha * (b.get("wind_gusts_mph", 0.0) - a.get("wind_gusts_mph", 0.0))
+    visibility = a.get("visibility_m", 99999.0) + alpha * (b.get("visibility_m", 99999.0) - a.get("visibility_m", 99999.0))
+    precipitation = a.get("precipitation_mm", 0.0) + alpha * (b.get("precipitation_mm", 0.0) - a.get("precipitation_mm", 0.0))
+
+    return {
+        "forecast_time": target_time_iso,
+        "wind_speed_mph": round(wind, 2),
+        "wind_gusts_mph": round(gust, 2),
+        "visibility_m": round(visibility, 1),
+        "precipitation_mm": round(precipitation, 2),
+        "status": weather_status(wind, gust, visibility, precipitation),
+    }
+
 def fetch_weather_for_nodes(nodes: Dict[str, dict], target_time_iso: Optional[str] = None) -> Dict[str, dict]:
     results = {}
 
     if target_time_iso is None:
         target_time_iso = datetime.now().replace(minute=0, second=0).isoformat(timespec="minutes")
 
+    dt = datetime.fromisoformat(target_time_iso)
+
+    # exact hour: existing behavior
+    if dt.minute == 0:
+        for node_id, node in nodes.items():
+            try:
+                results[node_id] = fetch_historical_weather_for_node(node, target_time_iso)
+            except Exception as exc:
+                results[node_id] = {
+                    "status": "unknown",
+                    "error": str(exc),
+                }
+        return results
+
+    lower_iso = floor_hour_iso(target_time_iso)
+    upper_iso = ceil_hour_iso(target_time_iso)
+    alpha = interpolation_fraction(target_time_iso)
+
     for node_id, node in nodes.items():
         try:
-            results[node_id] = fetch_historical_weather_for_node(node, target_time_iso)
+            lower = fetch_historical_weather_for_node(node, lower_iso)
+            upper = fetch_historical_weather_for_node(node, upper_iso)
+            results[node_id] = interpolate_node_weather(lower, upper, target_time_iso, alpha)
         except Exception as exc:
             results[node_id] = {
                 "status": "unknown",

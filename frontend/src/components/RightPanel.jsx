@@ -5,6 +5,7 @@ export default function RightPanel({
   selectedType,
   selectedNode,
   routeData,
+  selectedFlight,
   weather,
 }) {
   const panelTitle =
@@ -49,7 +50,6 @@ export default function RightPanel({
         }}
       >
         <span>{panelTitle}</span>
-
         <span
           style={{
             fontSize: "12px",
@@ -63,19 +63,24 @@ export default function RightPanel({
           ACTIVE
         </span>
       </div>
+
       <div
         style={{
           flex: 1,
-          overflow: "hidden",          // 🔴 CHANGE
+          overflow: "hidden",
           padding: "16px",
-          display: "flex",             // 🔴 ADD
-          flexDirection: "column",     // 🔴 ADD
+          display: "flex",
+          flexDirection: "column",
         }}
-      ><div style={{ flex: 1, overflowY: "auto" }}>
+      >
+        <div style={{ flex: 1, overflowY: "auto" }}>
           {selectedType === "port" && selectedNode ? (
             <PortPanel node={selectedNode} weather={weather} />
-          ) : selectedType === "flight" && routeData ? (
-            <FlightPanel routeData={routeData} />
+          ) : selectedType === "flight" && (routeData || selectedFlight) ? (
+            <FlightPanel
+              routeData={routeData}
+              selectedFlight={selectedFlight}
+            />
           ) : (
             <div
               style={{
@@ -95,5 +100,5 @@ export default function RightPanel({
         </div>
       </div>
     </div>
-  )
+  );
 }

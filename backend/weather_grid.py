@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 from requests.exceptions import HTTPError
 import threading
@@ -98,6 +98,23 @@ def normalize_hour_iso(target_time_iso: str) -> str:
     dt = datetime.fromisoformat(target_time_iso)
     return f"{dt.date().isoformat()}T{dt.hour:02d}:00"
 
+def floor_hour_iso(target_time_iso: str) -> str:
+    dt = datetime.fromisoformat(target_time_iso)
+    return f"{dt.date().isoformat()}T{dt.hour:02d}:00"
+
+
+def ceil_hour_iso(target_time_iso: str) -> str:
+    dt = datetime.fromisoformat(target_time_iso)
+    if dt.minute == 0:
+        return f"{dt.date().isoformat()}T{dt.hour:02d}:00"
+
+    dt2 = dt.replace(minute=0) + timedelta(hours=1)
+    return f"{dt2.date().isoformat()}T{dt2.hour:02d}:00"
+
+
+def interpolation_fraction(target_time_iso: str) -> float:
+    dt = datetime.fromisoformat(target_time_iso)
+    return dt.minute / 60.0
 
 def generate_grid_points() -> List[Dict]:
     lat_points = np.arange(LAT_MIN, LAT_MAX + LAT_SPACING, LAT_SPACING)
@@ -127,6 +144,28 @@ def get_latest_cached_grid() -> Optional[List[Dict]]:
             return day_map[latest_key]
 
     return None
+
+def interpolate_weather_entry(a: Dict, b: Dict, alpha: float) -> Dict:
+    wa = a.get("weather", {})
+    wb = b.get("weather", {})
+
+    wind = wa.get("wind_speed_mph", 0.0) + alpha * (wb.get("wind_speed_mph", 0.0) - wa.get("wind_speed_mph", 0.0))
+    gust = wa.get("wind_gusts_mph", 0.0) + alpha * (wb.get("wind_gusts_mph", 0.0) - wa.get("wind_gusts_mph", 0.0))
+    vis = wa.get("visibility_m", 99999.0) + alpha * (wb.get("visibility_m", 99999.0) - wa.get("visibility_m", 99999.0))
+    precip = wa.get("precipitation_mm", 0.0) + alpha * (wb.get("precipitation_mm", 0.0) - wa.get("precipitation_mm", 0.0))
+
+    return {
+        "lat": a["lat"],
+        "lon": a["lon"],
+        "weather": {
+            "forecast_time": None,
+            "wind_speed_mph": round(wind, 2),
+            "wind_gusts_mph": round(gust, 2),
+            "visibility_m": round(vis, 1),
+            "precipitation_mm": round(precip, 2),
+            "status": weather_status(wind, gust, vis, precip),
+        },
+    }
 
 def fetch_weather_grid_batched(target_time_iso: str) -> List[Dict]:
     target_time_iso = normalize_hour_iso(target_time_iso)
@@ -168,8 +207,7 @@ def fetch_weather_grid_batched(target_time_iso: str) -> List[Dict]:
         fallback = get_latest_cached_grid()
         if fallback is not None:
             append_log(f"Weather fetch failed for {target_time_iso}: {exc}; using latest cached grid instead")
-            if results:
-                HOURLY_GRID_CACHE[target_time_iso] = results
+            return fallback
         raise
 
     # If only one coordinate is returned, Open-Meteo may return a dict instead of a list.
@@ -300,14 +338,44 @@ def _preload_weather_day_worker(date_str: str) -> None:
 
 
 def get_cached_weather_grid(target_time_iso: str) -> List[Dict]:
-    normalized = normalize_hour_iso(target_time_iso)
-    dt = datetime.fromisoformat(normalized)
-    date_str = dt.date().isoformat()
+    dt = datetime.fromisoformat(target_time_iso)
 
-    if normalized in HOURLY_GRID_CACHE:
-        return HOURLY_GRID_CACHE[normalized]
+    # exact hour -> use existing hourly cache path
+    if dt.minute == 0:
+        normalized = normalize_hour_iso(target_time_iso)
+        date_str = dt.date().isoformat()
 
-    if date_str in DAY_GRID_CACHE and normalized in DAY_GRID_CACHE[date_str]:
-        return DAY_GRID_CACHE[date_str][normalized]
+        if normalized in HOURLY_GRID_CACHE:
+            return HOURLY_GRID_CACHE[normalized]
 
-    return fetch_weather_grid_batched(normalized)
+        if date_str in DAY_GRID_CACHE and normalized in DAY_GRID_CACHE[date_str]:
+            return DAY_GRID_CACHE[date_str][normalized]
+
+        return fetch_weather_grid_batched(normalized)
+
+    # quarter-hour interpolation cache key
+    exact_key = f"{dt.date().isoformat()}T{dt.hour:02d}:{dt.minute:02d}"
+    if exact_key in HOURLY_GRID_CACHE:
+        return HOURLY_GRID_CACHE[exact_key]
+
+    lower_iso = floor_hour_iso(target_time_iso)
+    upper_iso = ceil_hour_iso(target_time_iso)
+    alpha = interpolation_fraction(target_time_iso)
+
+    lower_grid = get_cached_weather_grid(lower_iso)
+    upper_grid = get_cached_weather_grid(upper_iso)
+
+    if not lower_grid:
+        return upper_grid
+    if not upper_grid:
+        return lower_grid
+    if len(lower_grid) != len(upper_grid):
+        return lower_grid
+
+    interpolated = [
+        interpolate_weather_entry(a, b, alpha)
+        for a, b in zip(lower_grid, upper_grid)
+    ]
+
+    HOURLY_GRID_CACHE[exact_key] = interpolated
+    return interpolated

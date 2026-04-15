@@ -5,6 +5,8 @@ export default function LeftSidebar({
   pendingEnd,
   setPendingStart,
   setPendingEnd,
+  pendingDepartureTime,
+  setPendingDepartureTime,
   onCreateFlight,
   onSelectFlight,
   onDeleteFlight,
@@ -13,10 +15,25 @@ export default function LeftSidebar({
     .filter((node) => node?.id)
     .sort((a, b) => a.id.localeCompare(b.id));
 
+  const selectStyle = {
+    width: "100%",
+    padding: "8px",
+    borderRadius: "8px",
+    border: "1px solid rgba(255,255,255,0.15)",
+    background: "#08244f",
+    color: "white",
+  };
+
+  const labelStyle = {
+    fontSize: "12px",
+    opacity: 0.85,
+    marginBottom: "4px",
+  };
+
   return (
     <div
       style={{
-        width: "410px",
+        width: "310px",
         height: "100%",
         display: "flex",
         flexDirection: "column",
@@ -27,6 +44,7 @@ export default function LeftSidebar({
         color: "white",
       }}
     >
+      {/* Header */}
       <div
         style={{
           padding: "16px",
@@ -39,6 +57,7 @@ export default function LeftSidebar({
         FLIGHT MANAGER
       </div>
 
+      {/* Add Flight form */}
       <div style={{ padding: "14px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
         <div
           style={{
@@ -54,20 +73,10 @@ export default function LeftSidebar({
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            {/* Origin */}
             <div>
-              <div style={{ fontSize: "12px", opacity: 0.85, marginBottom: "4px" }}>Origin</div>
-              <select
-                value={pendingStart}
-                onChange={(e) => setPendingStart(e.target.value)}
-                style={{
-                  width: "100%",
-                  padding: "8px",
-                  borderRadius: "8px",
-                  border: "1px solid rgba(255,255,255,0.15)",
-                  background: "#08244f",
-                  color: "white",
-                }}
-              >
+              <div style={labelStyle}>Origin</div>
+              <select value={pendingStart} onChange={(e) => setPendingStart(e.target.value)} style={selectStyle}>
                 <option value="">Select port...</option>
                 {portOptions.map((node) => (
                   <option key={`start-${node.id}`} value={node.id}>
@@ -77,20 +86,10 @@ export default function LeftSidebar({
               </select>
             </div>
 
+            {/* Destination */}
             <div>
-              <div style={{ fontSize: "12px", opacity: 0.85, marginBottom: "4px" }}>Destination</div>
-              <select
-                value={pendingEnd}
-                onChange={(e) => setPendingEnd(e.target.value)}
-                style={{
-                  width: "100%",
-                  padding: "8px",
-                  borderRadius: "8px",
-                  border: "1px solid rgba(255,255,255,0.15)",
-                  background: "#08244f",
-                  color: "white",
-                }}
-              >
+              <div style={labelStyle}>Destination</div>
+              <select value={pendingEnd} onChange={(e) => setPendingEnd(e.target.value)} style={selectStyle}>
                 <option value="">Select port...</option>
                 {portOptions.map((node) => (
                   <option key={`end-${node.id}`} value={node.id}>
@@ -98,6 +97,20 @@ export default function LeftSidebar({
                   </option>
                 ))}
               </select>
+            </div>
+
+            {/* Departure time */}
+            <div>
+              <div style={labelStyle}>Departure Time <span style={{ opacity: 0.55 }}>(leave blank to use sim clock)</span></div>
+              <input
+                type="time"
+                value={pendingDepartureTime}
+                onChange={(e) => setPendingDepartureTime(e.target.value)}
+                style={{
+                  ...selectStyle,
+                  colorScheme: "dark",
+                }}
+              />
             </div>
 
             <button
@@ -126,7 +139,8 @@ export default function LeftSidebar({
         </div>
       </div>
 
-      <div style={{ padding: "14px", fontWeight: "bold", fontSize: "15px" }}>
+      {/* Active flights list */}
+      <div style={{ padding: "14px 14px 6px", fontWeight: "bold", fontSize: "15px" }}>
         Active Flights
       </div>
 
@@ -144,76 +158,114 @@ export default function LeftSidebar({
             No active flights yet.
           </div>
         ) : (
-          activeFlights.map((flight) => (
-            <div
-              key={flight.id}
-              onClick={() => onSelectFlight(flight)}
-              style={{
-                background: "#0a2d63",
-                border: "1px solid rgba(255,255,255,0.12)",
-                borderRadius: "14px",
-                padding: "14px",
-                marginBottom: "12px",
-                boxShadow: "0 4px 12px rgba(0,0,0,0.25)",
-                cursor: "pointer",
-              }}
-            >
+          activeFlights.map((flight) => {
+            const statusColor =
+              flight.status === "arrived" ? "#4caf50"
+              : flight.status === "turnaround" ? "#ffb74d"
+              : flight.status === "waiting_departure" ? "#90caf9"
+              : "#4fc3f7";
+
+            const statusLabel =
+              flight.status === "arrived" ? "Arrived"
+              : flight.status === "turnaround" ? "At Exchange"
+              : flight.status === "waiting_departure" ? "Scheduled"
+              : flight.status === "enroute_leg1" ? "Leg 1"
+              : flight.status === "enroute_leg2" ? "Leg 2"
+              : "En Route";
+
+            return (
               <div
+                key={flight.id}
+                onClick={() => onSelectFlight(flight)}
                 style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  marginBottom: "8px",
+                  background: "#0a2d63",
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  borderRadius: "14px",
+                  padding: "12px 14px",
+                  marginBottom: "10px",
+                  boxShadow: "0 4px 12px rgba(0,0,0,0.25)",
+                  cursor: "pointer",
                 }}
               >
-                <div style={{ fontWeight: "bold", fontSize: "16px" }}>
-                  {flight.start} → {flight.end}
-                </div>
+                {/* Route + status badge */}
                 <div
                   style={{
-                    fontSize: "11px",
-                    fontWeight: "bold",
-                    padding: "4px 8px",
-                    borderRadius: "999px",
-                    background:
-                      flight.risk === "High"
-                        ? "#e53935"
-                        : flight.risk === "Medium"
-                          ? "#fbc02d"
-                          : "#43a047",
-                    color: flight.risk === "Medium" ? "#222" : "white",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    marginBottom: "8px",
                   }}
                 >
-                  {flight.risk || "Pending"}
+                  <div style={{ fontWeight: "bold", fontSize: "15px" }}>
+                    {flight.start} → {flight.end}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: "11px",
+                      fontWeight: "bold",
+                      padding: "3px 8px",
+                      borderRadius: "999px",
+                      background: statusColor,
+                      color: "#002b5c",
+                    }}
+                  >
+                    {statusLabel}
+                  </div>
+                </div>
+
+                {/* Distance + progress */}
+                <div style={{ fontSize: "13px", lineHeight: 1.6, opacity: 0.92 }}>
+                  <div>Distance: {flight.distanceText || "—"}</div>
+                  <div>Progress: {((flight.progress ?? 0) * 100).toFixed(0)}%</div>
+                </div>
+
+                {/* Departure / Arrival times */}
+                <div
+                  style={{
+                    marginTop: "8px",
+                    padding: "7px 10px",
+                    background: "rgba(255,255,255,0.06)",
+                    borderRadius: "8px",
+                    fontSize: "12px",
+                    display: "flex",
+                    justifyContent: "space-between",
+                  }}
+                >
+                  <span>
+                    <span style={{ opacity: 0.65 }}>Dep </span>
+                    <b>{flight.departureLabel ?? "—"}</b>
+                  </span>
+                  <span style={{ opacity: 0.45 }}>→</span>
+                  <span>
+                    <span style={{ opacity: 0.65 }}>Arr </span>
+                    <b>{flight.arrivalLabel ?? "—"}</b>
+                  </span>
+                </div>
+
+                {/* Delete */}
+                <div style={{ marginTop: "10px", display: "flex", justifyContent: "flex-end" }}>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteFlight(flight.id);
+                    }}
+                    style={{
+                      padding: "5px 10px",
+                      borderRadius: "8px",
+                      border: "1px solid rgba(255,255,255,0.15)",
+                      background: "#7d1020",
+                      color: "white",
+                      cursor: "pointer",
+                      fontWeight: "bold",
+                      fontSize: "12px",
+                    }}
+                  >
+                    Delete
+                  </button>
                 </div>
               </div>
-
-              <div style={{ fontSize: "14px", lineHeight: 1.5, opacity: 0.95 }}>
-                <div>Total: {flight.distanceText || "—"}</div>
-                <div>ETA: {flight.etaText || "—"}</div>
-              </div>
-
-              <div style={{ marginTop: "10px", display: "flex", justifyContent: "flex-end" }}>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDeleteFlight(flight.id);
-                  }}
-                  style={{
-                    padding: "6px 10px",
-                    borderRadius: "8px",
-                    border: "1px solid rgba(255,255,255,0.15)",
-                    background: "#7d1020",
-                    color: "white",
-                    cursor: "pointer",
-                    fontWeight: "bold",
-                  }}
-                >
-                  Delete
-                </button>
-              </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
     </div>
