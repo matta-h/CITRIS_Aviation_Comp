@@ -24,10 +24,23 @@ DEBUG_AIRSPACE = True
 
 GLOBAL_AIRSPACE_GEOJSON: Optional[Dict[str, Any]] = None
 
+def point_in_polygon(lat, lon, polygon):
+    # simple ray-casting
+    inside = False
+    j = len(polygon) - 1
+    for i in range(len(polygon)):
+        yi, xi = polygon[i]
+        yj, xj = polygon[j]
+        if ((xi > lon) != (xj > lon)) and (
+            lat < (yj - yi) * (lon - xi) / (xj - xi + 1e-9) + yi
+        ):
+            inside = not inside
+        j = i
+    return inside
+
 def adprint(msg: str) -> None:
     if DEBUG_AIRSPACE:
         print(msg)
-
 
 def _bbox_to_query(bounds: Tuple[float, float, float, float]) -> str:
     west, south, east, north = bounds

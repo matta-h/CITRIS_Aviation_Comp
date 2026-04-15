@@ -18,8 +18,8 @@ from backend.routing_single import (
     to_local_miles,
 )
 
-FIELD_STEP_MILES = 2.5
-FIELD_NEIGHBOR_RADIUS_MILES = 7.5
+FIELD_STEP_MILES = 4
+FIELD_NEIGHBOR_RADIUS_MILES = 10
 AIRPORT_CONNECT_RADIUS_MILES = 15.0
 
 HARD_BUFFER_FACTOR = 1.15
@@ -33,6 +33,9 @@ AIRSPACE_CACHE = load_airspace()
 USE_LEGACY_STATIC_OBSTACLES = False
 LEGACY_NO_FLY_ZONES = []
 LEGACY_SLOW_ZONES = []
+
+FIELD_GRAPH_CACHE = {}
+FIELD_GRAPH_CACHE_MAX = 12
 
 def point_in_zone(lat, lon, zone):
     if zone.get("geometry", "circle") == "circle":
@@ -222,6 +225,12 @@ def simplify_polyline_with_hard_and_soft_zones(polyline, hard_zones, soft_zones)
     return simplified
 
 def build_field_graph(target_time_iso: str):
+
+    cache_key = target_time_iso[:13]  # cache by hour, e.g. 2024-02-05T08
+
+    if cache_key in FIELD_GRAPH_CACHE:
+        return FIELD_GRAPH_CACHE[cache_key]
+
     weather_hard, weather_soft = build_weather_hazard_zones(target_time_iso)
     airspace = AIRSPACE_CACHE
 
@@ -276,6 +285,10 @@ def build_field_graph(target_time_iso: str):
                 "hazards": [],
             })
 
+    if len(FIELD_GRAPH_CACHE) >= FIELD_GRAPH_CACHE_MAX:
+        FIELD_GRAPH_CACHE.pop(next(iter(FIELD_GRAPH_CACHE)))
+
+    FIELD_GRAPH_CACHE[cache_key] = (graph, point_lookup)
     return graph, point_lookup
 
 def compress_path_nodes(path_nodes: List[str]) -> List[str]:

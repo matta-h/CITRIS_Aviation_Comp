@@ -72,15 +72,27 @@ def evaluate_airspace_constraints_for_polyline(
     hard_conflicts: List[Dict[str, Any]] = []
     soft_conflicts: List[Dict[str, Any]] = []
 
+    soft_distance_penalty = 0.0
+
     hard_seen: Set[tuple] = set()
     soft_seen: Set[tuple] = set()
 
     # === allow tolerance near endpoints (airport ingress/egress) ===
-    ENDPOINT_TOLERANCE_POINTS = 5  # first/last N points are exempt
+    ENDPOINT_TOLERANCE_POINTS = 1  # first/last N points are exempt
     n_points = len(polyline)
 
-    for idx, point in enumerate(polyline):
-        lat, lon = point
+    for idx in range(1, len(polyline)):
+        lat, lon = polyline[idx]
+        prev_lat, prev_lon = polyline[idx - 1]
+        
+        # rough miles conversion
+        ref_lat = (lat + prev_lat) / 2.0
+        miles_per_deg_lat = 69.0
+        miles_per_deg_lon = 69.0 * abs(__import__("math").cos(__import__("math").radians(ref_lat)))
+
+        dx = (lon - prev_lon) * miles_per_deg_lon
+        dy = (lat - prev_lat) * miles_per_deg_lat
+        segment_length_miles = (dx * dx + dy * dy) ** 0.5
 
         # Skip constraint enforcement near endpoints
         if idx < ENDPOINT_TOLERANCE_POINTS or idx > n_points - ENDPOINT_TOLERANCE_POINTS:
@@ -118,9 +130,14 @@ def evaluate_airspace_constraints_for_polyline(
                     hard_seen.add(key)
                     hard_conflicts.append(conflict_info)
             else:
+                # accumulate penalty based on distance inside soft airspace
+                soft_distance_penalty += segment_length_miles * c.severity
+
+                # still record the airspace once for UI/debug
                 if key not in soft_seen:
                     soft_seen.add(key)
                     soft_conflicts.append(conflict_info)
+
     if hard_conflicts:
         print(f"[AIRSPACE DEBUG] hard conflicts: {[c['name'] for c in hard_conflicts]}")
     if soft_conflicts:
@@ -129,5 +146,5 @@ def evaluate_airspace_constraints_for_polyline(
         "is_feasible": len(hard_conflicts) == 0,
         "hard_conflicts": hard_conflicts,
         "soft_conflicts": soft_conflicts,
-        "suggested_penalty": sum(item["severity"] for item in soft_conflicts),
+        "suggested_penalty": round(soft_distance_penalty, 2),
     }

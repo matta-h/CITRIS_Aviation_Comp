@@ -516,22 +516,25 @@ def plan_mission(
             departure_time_iso,
             cruise_alt_ft=cruise_alt_ft,
         )
+
         if exchange:
             candidates.append(exchange)
 
-            # Early accept a very good exchange route
+            # Early accept a very good exchange route,
+            # but only if it beats the already-found direct route.
             if exchange["score"] <= 105:
-                dprint(
-                    f"[MISSION] early accept exchange via {mid}: "
-                    f"score={exchange['score']:.2f}"
-                )
-                dprint(f"[MISSION] completed in {time.time() - t0:.2f}s")
-                return _finalize_selected_candidate(
-                    exchange,
-                    raw_direct_distance,
-                    cruise_alt_ft,
-                    departure_time_iso,
-                )
+                if direct is None or exchange["score"] < direct["score"]:
+                    dprint(
+                        f"[MISSION] early accept exchange via {mid}: "
+                        f"score={exchange['score']:.2f}"
+                    )
+                    dprint(f"[MISSION] completed in {time.time() - t0:.2f}s")
+                    return _finalize_selected_candidate(
+                        exchange,
+                        raw_direct_distance,
+                        cruise_alt_ft,
+                        departure_time_iso,
+                    )
 
     if not candidates:
         dprint("[MISSION] no feasible candidates")
