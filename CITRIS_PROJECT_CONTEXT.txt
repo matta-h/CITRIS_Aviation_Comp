@@ -1,0 +1,264 @@
+CITRIS Aviation Prize — eVTOL Routing Simulator: Project Context
+================================================================
+
+PROJECT OVERVIEW
+----------------
+This is a simulation and route-planning tool for the CITRIS Aviation Prize Competition,
+modeling a Joby S4 eVTOL air taxi network across Northern California connecting UC campuses
+(UCSC, UCB, UCD, UCM) and regional airports (KSQL, KNUQ, KLVK, KCVH, KSNS, KOAR).
+The tool is being built for a competition judged on realism, safety awareness, and
+operational planning quality.
+
+
+REPOSITORY STRUCTURE
+--------------------
+CITRIS_Aviation_Comp/
+├── backend/
+│   ├── app.py                    # FastAPI server, all API endpoints
+│   ├── mission_planner.py        # Top-level mission orchestration
+│   ├── routing.py                # Field graph pathfinder (Dijkstra)
+│   ├── routing_single.py         # Node definitions, legacy routing helpers
+│   ├── altitude_profile.py       # Joby S4 climb/cruise/descent model
+│   ├── terrain_adapter.py        # DEM raster elevation sampling
+│   ├── terrain_feasibility.py    # Terrain clearance checks
+│   ├── weather_history.py        # Open-Meteo historical weather fetch
+│   ├── weather_grid.py           # NorCal weather grid, caching, interpolation
+│   ├── airspace_adapter.py       # OpenAIR + ForeFlight airspace loading
+│   ├── airspace_feasibility.py   # Airspace constraint evaluation
+│   ├── airspace_legacy.py        # Legacy airspace loader
+│   ├── geometry.py               # Geometric helpers (segment hits zone, etc.)
+│   ├── population_adapter.py     # LandScan 2021 population density TIF reader
+│   └── terrain_data/
+│       ├── *.tif                 # 9 USGS DEM elevation tiles (NorCal)
+│       ├── landscan-usa-2021-conus-day.tif    # LandScan population (day)
+│       └── landscan-usa-2021-conus-night.tif  # LandScan population (night)
+├── frontend/
+│   └── src/
+│       ├── App.js                # Main React component, all map logic
+│       └── components/
+│           ├── LeftPanel.jsx     # Flight manager, add flight form
+│           ├── RightPanel.jsx    # Port/flight detail panel
+│           ├── FlightPanel.jsx   # Live flight telemetry display
+│           ├── PortPanel.jsx     # Vertiport weather/ops display
+│           └── BottomToolbar.jsx # Timeline scrubber, play/pause, sim speed
+
+
+TECH STACK
+----------
+Backend:  Python 3.11, FastAPI, uvicorn, rasterio, numpy, requests
+Frontend: React (Create React App), React-Leaflet (map), Turf.js (geometry), Leaflet
+
+
+BACKEND ARCHITECTURE
+--------------------
+
+Mission Planner (mission_planner.py)
+  Top-level orchestrator. For any origin->destination pair:
+  1. Checks if direct mission is feasible (< 85 miles routed distance)
+  2. If not, evaluates exchange candidates (intermediate airport stops)
+  3. For each candidate: solves both legs, runs airspace + terrain checks, scores route
+  4. Returns the best-scoring mission with full route data
+
+  Key constants:
+    MAX_DIRECT_MISSION_MILES = 85.0
+    EFFECTIVE_AIRSPEED_MPH   = 120.0
+    EXCHANGE_DELAY_MIN       = 30.0
+    DEFAULT_CRUISE_ALT_FT    = 4500.0
+
+  Vertiport elevations (ft):
+    UCSC=784, UCB=328, UCD=120, UCM=260,
+    KSQL=7, KNUQ=30, KLVK=371, KCVH=223, KSNS=79, KOAR=135
+
+Field Graph Router (routing.py)
+  Builds a graph of field waypoints (4-mile grid) + airport nodes.
+  Runs Dijkstra with soft/hard zone penalties.
+
+  Hard zones: unsafe weather circles, restricted airspace -> edges blocked
+  Soft zones: caution weather, airspace soft conflicts, population density -> cost penalty
+
+  Population integration:
+    High-density areas (>1500 pop/cell): +5 min penalty
+    Very-high density (>5000 pop/cell):  +12 min penalty
+    Population zones applied to graph edge costs ONLY.
+    Explicitly excluded from polyline simplification to avoid O(n^2 x zones) hang.
+
+Altitude Profile (altitude_profile.py)
+  Models Joby S4 altitude through 4 phases per leg:
+  1. VTOL vertical lift:  0-0.15 miles,  origin_alt -> origin_alt+1500 ft
+  2. Forward climb:       0.15-4.0 miles, transition_alt -> 4500 ft cruise
+  3. Cruise:              4500 ft
+  4. Descent:             last 4.0 miles, 4500 -> dest_alt+1500 ft
+  5. VTOL vertical descent: last 0.15 miles -> dest_alt
+
+Terrain Adapter (terrain_adapter.py)
+  Loads 9 DEM tiles at startup, caches ALL band arrays in RAM as numpy arrays.
+  sample_elevation_ft(lat, lon) indexes cached arrays — no disk I/O per sample.
+  Excludes LandScan TIFs from DEM loading via "landscan" filename filter.
+  IMPORTANT: The original code called ds.read(1) inside the per-point loop,
+  causing severe performance issues. The fix reads each band once at load time.
+
+Population Adapter (population_adapter.py)
+  Reads LandScan CONUS TIF using windowed read (NorCal bbox only).
+  Pre-loads both day and night grids in a background thread at module import time.
+  Classifies cells: minimal / low / medium / high / very_high
+  Thresholds: low=50, medium=300, high=1500, very_high=5000 (people per 90m cell)
+
+Weather (weather_history.py, weather_grid.py)
+  Fetches historical weather from Open-Meteo archive API.
+  Supports hourly interpolation and pre-caching for a date/time window.
+  Grid spacing: ~0.2 degrees over NorCal bounding box.
+  Bounding box: lat 36.33-38.88, lon -122.61 to -120.07
+
+
+FRONTEND ARCHITECTURE
+---------------------
+
+App.js — Central component. Manages all state including:
+  activeFlights[]  — each flight has:
+    routeData, departureTimeMinutes, isExchange,
+    leg1Minutes, leg2Minutes, exchangeDelayMinutes,
+    exchangeStopPosition, currentPosition, status, progress, telemetry
+  currentTimeMinutes — sim clock driven by stable setInterval reading refs
+  isPlayingRef / simSpeedRef — refs (not state) used inside interval
+    to avoid stale closure bug
+
+Sim Clock:
+  Single setInterval on mount, never recreated.
+  Reads isPlayingRef.current each tick.
+  Play/pause updates the ref SYNCHRONOUSLY then state for re-render.
+  Weather fetches are debounced 600ms to avoid flooding during playback.
+
+Flight Position System:
+  All logic in computeFlightPositionAltitudeAware() — single unified function.
+  Uses arc-length parameterized polyline interpolation (interpolatePosition)
+  so visual speed is geographically consistent regardless of vertex density.
+
+  Exchange flight model:
+    leg1PolyEndFrac = leg1Dist / totalDist  (distance-based, NOT time-based)
+    Terminal states (arrived, waiting, turnaround) return fixed positions immediately.
+    Vertical phase (< 0.15 miles from leg endpoints) freezes horizontal position.
+    Exchange stop uses exact node lat/lon (exchangeStopPosition), not polyline fraction.
+
+Telemetry (computeFlightTelemetry):
+  Computes altitude and speed entirely on the frontend using altitudeAtDistance().
+  Replicates altitude_profile.py math exactly.
+  Does NOT use backend altitude_profile arrays (only 2 points due to simplified polyline).
+  Uses VERTIPORT_ELEVATION_FT dict mirroring backend constants.
+
+  Speed model:
+    0 -> 20 mph   over 0.00-0.15 mi  (VTOL vertical phase)
+    20 -> 120 mph over 0.15-4.00 mi  (climb phase)
+    120 mph       cruise
+    120 -> 20 mph over last 4.00 mi  (descent, symmetric)
+    20 -> 0 mph   over last 0.15 mi  (VTOL vertical descent)
+
+  Frontend altitude/speed constants (must match altitude_profile.py):
+    VERTICAL_TRANSITION_MILES = 0.15
+    CRUISE_ALT_FT             = 4500.0
+    CLIMB_DIST_MILES          = 4.0
+    DESCENT_DIST_MILES        = 4.0
+    CRUISE_SPEED_MPH          = 120.0
+
+Map Layers:
+  - Node markers with weather color rings (good=green, caution=gold, unsafe=red)
+  - Route polyline (blue, weight 5) + raw polyline (gray dashed)
+  - Weather grid circles (color = good/caution/unsafe status)
+  - Hazard polygons (merged unsafe weather regions via Turf.js union)
+  - Population density circles (lazy-loaded on first toggle):
+      low=muted green, medium=yellow, high=orange, very_high=red
+  - Airspace polygons (OpenAIR, color-coded by class B/C/D/E/G/R/P)
+
+
+API ENDPOINTS
+-------------
+GET  /nodes                              All vertiport/airport nodes
+GET  /route?start=&end=&departure_time=  Plan a mission
+GET  /weather?target_time=               Node-level weather
+GET  /weather-grid?target_time=          Grid weather points
+POST /weather-grid-day-preload           Pre-cache weather for date range
+GET  /obstacles                          Weather hazard zones
+GET  /airspace-geojson                   Airspace polygons as GeoJSON
+GET  /set-airspace-source?source=        Switch openair/foreflight
+GET  /population-grid?time_of_day=       Population density grid (day/night)
+POST /terrain-check                      Terrain clearance for a polyline
+
+
+KNOWN ISSUES / CURRENT STATE
+-----------------------------
+The backend is currently not binding to port 8000 after recent changes to
+terrain_adapter.py and population_adapter.py. Uvicorn shows startup messages
+and population pre-load completes, but the worker process crashes silently.
+
+Suspected cause: rasterio file handle conflict between the population pre-load
+background thread and terrain_adapter.py's module-level rasterio.open() calls
+happening concurrently on Windows.
+
+To diagnose: run WITHOUT --reload to get clean traceback:
+  uvicorn backend.app:app
+
+The population pre-load thread in population_adapter.py starts at import time.
+terrain_adapter.py also opens rasterio files at import time (module level).
+Both happen during the same startup sequence. On Windows, rasterio may not
+support concurrent file access across threads safely.
+
+Possible fix approaches:
+  1. Delay population pre-load until after terrain_adapter finishes loading
+     (use a threading.Event or just time.sleep before starting the thread)
+  2. Make population pre-load synchronous at startup (slower but safer)
+  3. Use a multiprocessing.Lock around rasterio operations
+
+
+RECENTLY COMPLETED FEATURES
+----------------------------
+- Multi-flight animation with arc-length parameterized movement
+- Exchange flight position interpolation (distance-based polyline split)
+- Exchange stop snap using exact node coordinates
+- Altitude-aware position (VTOL vertical phase freezes horizontal position)
+- Live telemetry (altitude ft, speed mph) computed from first principles on frontend
+- Play/pause sim clock with ref-based interval (no stale closure bug)
+- Weather fetch debouncing during playback
+- Departure time input on flight creation form
+- Departure/arrival time display on flight cards in left panel
+- Population density display overlay (LandScan 2021, day/night)
+- Population routing soft penalties (avoid dense areas when paths are similar cost)
+- LandScan windowed TIF read (NorCal bbox only, reads band once not per-point)
+- DEM band caching in RAM (terrain_adapter reads all bands at startup)
+- LandScan TIF excluded from DEM loader via filename filter
+
+
+PLANNED / IN PROGRESS
+----------------------
+- Fix backend startup crash (rasterio threading issue on Windows)
+- Emergency divert routing to nearest airport (infrastructure exists in
+  candidate_exchange_nodes in mission_planner.py — similar concept)
+- Demand generation tied to population density
+- Port queue/operations panel (placeholder exists in PortPanel.jsx)
+- Finance/cost layer
+- Simulation playback improvements (ATC communications, collision avoidance)
+
+
+IMPORTANT IMPLEMENTATION NOTES
+--------------------------------
+1. leg1Minutes and leg2Minutes on flight objects are computed as:
+   (distance_miles / 120) * 60
+   NOT read from data.legs[x].total_time_minutes.
+   This was an intentional decision for consistency with frontend speed model.
+
+2. The backend altitude_profile for exchange legs only has 2 points
+   (start and end of the simplified 2-point polyline from field routing).
+   This is a known limitation. Altitude is computed entirely on the frontend
+   instead of using the backend profile.
+
+3. Population zones must NOT be passed to simplify_polyline_with_hard_and_soft_zones()
+   in routing.py. That function is O(n^2 x zones) and with 1050 population points
+   it causes a hang of several minutes. Population zones only go into the graph
+   edge cost calculation in build_field_graph().
+
+4. The FIELD_GRAPH_CACHE in routing.py caches by hour (target_time_iso[:13]).
+   After adding population zones, the cache key did not change, so old cached
+   graphs without population penalties may be served. Restart the server to
+   clear the cache when testing population routing behavior.
+
+5. On Windows with uvicorn --reload, crashes in background threads (like the
+   population pre-load) may not surface in the console. Always test with
+   uvicorn backend.app:app (no --reload) when diagnosing startup issues.

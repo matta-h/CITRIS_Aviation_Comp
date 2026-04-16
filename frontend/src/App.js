@@ -150,6 +150,36 @@ const evtolIcon = new L.Icon({
   iconAnchor: [20, 20],
 });
 
+// Per-VTOL map display constants
+const VTOL_STATUS_COLORS = {
+  available:           "#4caf50",
+  taxiing_to_pad:      "#ffb74d",
+  in_flight:           "#4fc3f7",
+  taxiing_to_charge:   "#ffb74d",
+  charging:            "#ff9800",
+  queued:              "#ce93d8",
+  inoperable:          "#ef5350",
+};
+
+const VTOL_STATUS_LABELS = {
+  available:           "Available",
+  taxiing_to_pad:      "Taxiing to Pad",
+  in_flight:           "In Flight",
+  taxiing_to_charge:   "Taxiing to Charger",
+  charging:            "Charging",
+  queued:              "Queued",
+  inoperable:          "Inoperable",
+};
+
+// Offset pattern: VTOL -01=N, -02=E, -03=S, -04=W (stable regardless of how many are flying)
+// ~0.025° ≈ 1.7 mi — invisible at zoom 7 overview, fans out nicely at zoom 9+
+const VTOL_PORT_OFFSETS = [
+  [ 0.025,  0.000],  // 01 — North
+  [ 0.000,  0.035],  // 02 — East
+  [-0.025,  0.000],  // 03 — South
+  [ 0.000, -0.035],  // 04 — West
+];
+
 // ─────────────────────────────────────────────
 // Geographic distance between two [lat,lon] points (miles).
 // Fast flat-earth approximation — fine for regional scale.
@@ -514,6 +544,7 @@ function App() {
   const [showFlights, setShowFlights] = useState(true);
   const [populationGrid, setPopulationGrid] = useState([]);
   const [populationLoaded, setPopulationLoaded] = useState(false);
+  const [fleet, setFleet] = useState([]);
 
   // ── Sim clock controls ──────────────────────
   const [isPlaying, setIsPlaying] = useState(false);
@@ -673,6 +704,10 @@ function App() {
           departureLabel: fmtTime(chosenDepartureMinutes),
           arrivalLabel: fmtTime(arrivalMinutes),
 
+          // VTOL assignment
+          vtolId: data?.vtol_id ?? null,
+          vtolBatteryCostPct: data?.vtol_battery_cost_pct ?? null,
+
           // Sim state
           departureTimeMinutes: chosenDepartureMinutes,
           isExchange: Array.isArray(data?.legs) && data.legs.length > 1,
@@ -696,6 +731,13 @@ function App() {
         setActiveFlights((prev) => [newFlight, ...prev]);
         setError("");
         setIsRouting(false);
+
+        // Refresh fleet to reflect newly assigned VTOL
+        const currentIso = requestedGridTime ?? gridTime;
+        fetch(`http://127.0.0.1:8000/fleet?current_time=${encodeURIComponent(currentIso)}`)
+          .then((res) => res.json())
+          .then((d) => setFleet(Array.isArray(d) ? d : []))
+          .catch(() => {});
       })
       .catch((err) => {
         setRouteData(null);
@@ -780,11 +822,39 @@ function App() {
         setPopulationGrid([]);
       });
   }, [showPopulation, populationLoaded]);
+  // ── Fleet polling — debounced with sim clock ────────────────────
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const currentIso = requestedGridTime ?? gridTime;
+      fetch(`http://127.0.0.1:8000/fleet?current_time=${encodeURIComponent(currentIso)}`)
+        .then((res) => res.json())
+        .then((data) => setFleet(Array.isArray(data) ? data : []))
+        .catch(() => {});
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [requestedGridTime, gridTime]);
+
   const nodeMap = useMemo(() => {
     const map = {};
     nodes.forEach((node) => { map[node.id] = node; });
     return map;
   }, [nodes]);
+
+  // Parked VTOLs: all fleet entries that are NOT in_flight, with computed map position.
+  // Offset determined by VTOL number (last 2 digits of ID) so position is stable.
+  const parkedVtols = useMemo(() => {
+    return (fleet ?? [])
+      .filter((v) => v.status !== "in_flight")
+      .map((v) => {
+        const port = v.current_port;
+        const node = nodeMap[port];
+        if (!node) return null;
+        const vtolNum = parseInt(v.id.slice(-2), 10) - 1; // 0-indexed
+        const [dlat, dlon] = VTOL_PORT_OFFSETS[vtolNum % VTOL_PORT_OFFSETS.length];
+        return { ...v, position: [node.lat + dlat, node.lon + dlon] };
+      })
+      .filter(Boolean);
+  }, [fleet, nodeMap]);
 
   const routeSegments = useMemo(() => {
     if (!routeData || !routeData.legs) return [];
@@ -881,6 +951,7 @@ function App() {
         <LeftPanel
           nodes={nodes}
           activeFlights={activeFlights}
+          fleet={fleet}
           pendingStart={pendingStart}
           pendingEnd={pendingEnd}
           setPendingStart={setPendingStart}
@@ -928,28 +999,54 @@ function App() {
               </Circle>
             ))}
 
-            {/* ── Active flight markers ── */}
+            {/* ── Active flight markers (in-flight eVTOL icon) ── */}
             {showFlights &&
               activeFlights.map((flight) => {
                 const pos = flight.currentPosition;
                 if (!pos || !Array.isArray(pos) || pos.length < 2) return null;
 
-                // Status color for the label badge
-                const statusColor =
-                  flight.status === "arrived" ? "#4caf50"
-                  : flight.status === "turnaround" ? "#ffb74d"
-                  : "#4fc3f7";
-
                 return (
                   <Marker key={flight.id} position={pos} icon={evtolIcon}>
                     <Tooltip permanent={false} direction="top" offset={[0, -24]}>
+                      {flight.vtolId && <><b>{flight.vtolId}</b><br /></>}
                       <b>{flight.start} → {flight.end}</b><br />
                       Status: {flight.status}<br />
                       Progress: {(flight.progress * 100).toFixed(0)}%<br />
                       Altitude: {flight.telemetry?.altFt != null ? `${Math.round(flight.telemetry.altFt).toLocaleString()} ft` : "—"}<br />
-                      Speed: {flight.telemetry?.speedMph != null ? `${flight.telemetry.speedMph} mph` : "—"}
+                      Speed: {flight.telemetry?.speedMph != null ? `${flight.telemetry.speedMph} mph` : "—"}<br />
+                      Battery: {flight.vtolBatteryCostPct != null ? `−${flight.vtolBatteryCostPct.toFixed(0)}% this leg` : "—"}
                     </Tooltip>
                   </Marker>
+                );
+              })}
+
+            {/* ── Parked VTOL markers ── */}
+            {showFlights &&
+              parkedVtols.map((vtol) => {
+                const color = VTOL_STATUS_COLORS[vtol.status] ?? "#90caf9";
+                const label = VTOL_STATUS_LABELS[vtol.status] ?? vtol.status;
+                return (
+                  <CircleMarker
+                    key={`vtol-${vtol.id}`}
+                    center={vtol.position}
+                    radius={6}
+                    pathOptions={{
+                      color: "#001533",
+                      fillColor: color,
+                      fillOpacity: 0.9,
+                      weight: 1.5,
+                    }}
+                  >
+                    <Tooltip direction="top" offset={[0, -10]} opacity={0.97}>
+                      <b>{vtol.id}</b><br />
+                      {label}<br />
+                      Battery: {vtol.battery_pct.toFixed(0)}%<br />
+                      Port: {vtol.current_port}
+                      {vtol.from_port && vtol.to_port && (
+                        <><br />{vtol.from_port} → {vtol.to_port}</>
+                      )}
+                    </Tooltip>
+                  </CircleMarker>
                 );
               })}
 

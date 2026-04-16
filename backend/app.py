@@ -18,6 +18,10 @@ from backend.terrain_feasibility import evaluate_terrain_for_polyline
 from backend.airspace_legacy import load_airspace
 from backend.routing import build_weather_hazard_zones
 from backend.population_adapter import get_population_grid as _get_population_grid
+from backend.fleet import (
+    assign_vtol, battery_cost_pct,
+    get_fleet_snapshot, get_fleet_params, update_fleet_params, reset_fleet,
+)
 
 
 WEATHER_CACHE = {}
@@ -52,7 +56,65 @@ def get_route(start: str, end: str, departure_time: str | None = None):
     if result is None:
         raise HTTPException(status_code=404, detail="No feasible route found")
 
+    distance = result.get("total_distance_miles", 0.0)
+    arrival_iso = result.get("arrival_time") or departure_time
+    flight_id = f"{start}-{end}-{departure_time}"
+
+    exchange_info = None
+    if result.get("exchange_required"):
+        leg1_dist = result.get("leg1_distance_miles", 0.0)
+        leg2_dist = result.get("leg2_distance_miles", 0.0)
+        exchange_stop = (result.get("exchange_stops") or [None])[0]
+        exchange_delay = result.get("selection_notes", {}).get("exchange_delay_min", 30.0)
+        if leg1_dist and exchange_stop:
+            from datetime import datetime, timedelta
+            leg1_time_min = (leg1_dist / 120.0) * 60.0
+            dt = datetime.fromisoformat(departure_time)
+            leg1_arrival_iso = (dt + timedelta(minutes=leg1_time_min)).isoformat(timespec="minutes")
+            leg2_departure_iso = (dt + timedelta(minutes=leg1_time_min + exchange_delay)).isoformat(timespec="minutes")
+            exchange_info = {
+                "stop_port": exchange_stop,
+                "leg1_arrival_iso": leg1_arrival_iso,
+                "leg2_departure_iso": leg2_departure_iso,
+                "leg1_dist": leg1_dist,
+                "leg2_dist": leg2_dist,
+            }
+
+    vtol_id = assign_vtol(
+        origin_port=start,
+        departure_iso=departure_time,
+        arrival_iso=arrival_iso,
+        distance_miles=distance,
+        flight_id=flight_id,
+        destination_port=end,
+        exchange_info=exchange_info,
+    )
+
+    result["vtol_id"] = vtol_id
+    result["vtol_battery_cost_pct"] = round(battery_cost_pct(distance), 1)
+
     return result
+
+
+@app.get("/fleet")
+def get_fleet(current_time: str | None = None):
+    return get_fleet_snapshot(current_time)
+
+
+@app.get("/fleet/params")
+def fleet_params_get():
+    return get_fleet_params()
+
+
+@app.post("/fleet/params")
+def fleet_params_update(payload: dict):
+    return update_fleet_params(payload)
+
+
+@app.post("/fleet/reset")
+def fleet_reset():
+    reset_fleet()
+    return {"status": "ok"}
 
 @app.get("/obstacles")
 def get_obstacles(target_time: str | None = None):

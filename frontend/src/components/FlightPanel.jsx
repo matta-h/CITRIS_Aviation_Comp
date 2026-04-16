@@ -23,6 +23,41 @@ const Row = ({ label, value, highlight }) => (
   </div>
 );
 
+const VTOL_STATUS_COLOR = {
+  available:           "#4caf50",
+  taxiing_to_pad:      "#ffb74d",
+  in_flight:           "#4fc3f7",
+  taxiing_to_charge:   "#ffb74d",
+  charging:            "#ff9800",
+  queued:              "#ce93d8",
+  inoperable:          "#ef5350",
+};
+
+const VTOL_STATUS_LABEL = {
+  available:           "Available",
+  taxiing_to_pad:      "Taxiing to Pad",
+  in_flight:           "In Flight",
+  taxiing_to_charge:   "Taxiing to Charger",
+  charging:            "Charging",
+  queued:              "Queued",
+  inoperable:          "Inoperable",
+};
+
+function BatteryBar({ pct }) {
+  const color = pct > 60 ? "#4caf50" : pct > 30 ? "#ffb74d" : "#ef5350";
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "4px" }}>
+      <div style={{
+        flex: 1, height: "8px", background: "rgba(255,255,255,0.1)",
+        borderRadius: "4px", overflow: "hidden",
+      }}>
+        <div style={{ width: `${Math.max(0, Math.min(pct, 100))}%`, height: "100%", background: color, borderRadius: "4px" }} />
+      </div>
+      <span style={{ fontSize: "12px", fontWeight: "bold", minWidth: "36px" }}>{Math.round(pct)}%</span>
+    </div>
+  );
+}
+
 export default function FlightPanel({ routeData, selectedFlight }) {
   if (!routeData && !selectedFlight) return null;
 
@@ -178,6 +213,50 @@ export default function FlightPanel({ routeData, selectedFlight }) {
               ? `${(selectedFlight.progress * 100).toFixed(0)}%`
               : "—"}
           />
+        </div>
+      )}
+
+      {/* ── VTOL Assignment ── */}
+      {selectedFlight?.vtolId && (
+        <div style={{
+          background: "#071e40",
+          border: "2px solid #0c3f73",
+          borderRadius: "12px",
+          padding: "14px 16px",
+          marginBottom: "16px",
+          color: "white",
+        }}>
+          <div style={{ fontWeight: "bold", marginBottom: "10px", fontSize: "16px", opacity: 0.85 }}>
+            VTOL Assignment
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+            <span style={{ fontSize: "20px", fontWeight: "bold", letterSpacing: "1px" }}>
+              {selectedFlight.vtolId}
+            </span>
+            {(() => {
+              const statusColor = VTOL_STATUS_COLOR[selectedFlight.status === "in_flight" || selectedFlight.status === "enroute" || selectedFlight.status === "enroute_leg1" || selectedFlight.status === "enroute_leg2" ? "in_flight" : selectedFlight.status === "arrived" ? "available" : "taxiing_to_pad"] ?? "#90caf9";
+              const statusLabel = selectedFlight.status === "arrived" ? "Completed" : selectedFlight.status === "waiting_departure" ? "Taxiing to Pad" : "In Flight";
+              return (
+                <span style={{
+                  fontSize: "11px", fontWeight: "bold", padding: "3px 8px",
+                  borderRadius: "999px", background: statusColor, color: "#002b5c",
+                }}>
+                  {statusLabel}
+                </span>
+              );
+            })()}
+          </div>
+          {selectedFlight.vtolBatteryCostPct != null && (
+            <>
+              <div style={{ fontSize: "12px", opacity: 0.7, marginBottom: "2px" }}>
+                Battery usage this flight
+              </div>
+              <BatteryBar pct={100 - selectedFlight.vtolBatteryCostPct} />
+              <div style={{ fontSize: "11px", opacity: 0.55, marginTop: "4px" }}>
+                −{selectedFlight.vtolBatteryCostPct.toFixed(1)}% of {150} mi max range
+              </div>
+            </>
+          )}
         </div>
       )}
 

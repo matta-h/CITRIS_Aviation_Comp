@@ -12,7 +12,7 @@ from backend.terrain_feasibility import evaluate_terrain_for_polyline
 from backend.weather_history import fetch_weather_for_nodes
 from backend.altitude_profile import generate_altitude_profile
 
-MAX_DIRECT_MISSION_MILES = 85.0
+MAX_DIRECT_MISSION_MILES = 120.0
 EFFECTIVE_AIRSPEED_MPH = 120.0
 EXCHANGE_DELAY_MIN = 30.0
 
@@ -21,7 +21,7 @@ DEFAULT_CRUISE_ALT_FT = 4500.0
 AIRSPACE_SOFT_PENALTY_MIN = 0.5
 CORRIDOR_PENALTY_PER_MILE_MIN = 1.5
 
-EARLY_ACCEPT_DIRECT_DISTANCE_MILES = 75.0
+EARLY_ACCEPT_DIRECT_DISTANCE_MILES = 105.0
 EARLY_ACCEPT_DIRECT_SCORE_MIN = 45.0
 
 DEBUG_MISSION = True
@@ -409,6 +409,10 @@ def build_exchange_candidate(
             "total_time_minutes": round(
                 flight_data["leg1Minutes"] + flight_data["exchangeDelayMinutes"] + flight_data["leg2Minutes"], 1
             ),
+            "leg1_distance_miles": round(leg1_checked["total_distance_miles"], 2),
+            "leg2_distance_miles": round(leg2_checked["total_distance_miles"], 2),
+            "leg1_time_minutes": round(flight_data["leg1Minutes"], 2),
+            "leg2_time_minutes": round(flight_data["leg2Minutes"], 2),
             "altitude_profile_leg1": leg1_checked.get("altitude_profile", []),
             "altitude_profile_leg2": leg2_checked.get("altitude_profile", []),
             "airspace_feasibility": {
