@@ -17,6 +17,7 @@ from backend.routing_single import (
     distance_between,
     to_local_miles,
 )
+from backend.population_adapter import build_population_penalty_zones
 
 FIELD_STEP_MILES = 4
 FIELD_NEIGHBOR_RADIUS_MILES = 10
@@ -36,6 +37,42 @@ LEGACY_SLOW_ZONES = []
 
 FIELD_GRAPH_CACHE = {}
 FIELD_GRAPH_CACHE_MAX = 12
+
+# Population penalty zones — cached by time-of-day (day/night).
+# Loaded once from TIF on first routing call, stable across sim dates.
+_POPULATION_ZONES_CACHE: Dict[str, List[dict]] = {}
+
+def _get_population_zones(target_time_iso: str) -> List[dict]:
+    """
+    Return cached population soft zones, keyed by day/night.
+    Returns [] immediately if the pre-load hasn't finished yet,
+    so routing is never blocked waiting for the TIF.
+    Day = 06:00–19:59, Night = 20:00–05:59.
+    """
+    try:
+        hour = datetime.fromisoformat(target_time_iso).hour
+    except Exception:
+        hour = 12
+
+    tod = "day" if 6 <= hour < 20 else "night"
+
+    if tod not in _POPULATION_ZONES_CACHE:
+        # Check if the grid is already loaded by population_adapter
+        from backend.population_adapter import _DAY_GRID, _NIGHT_GRID
+        grid_ready = _DAY_GRID if tod == "day" else _NIGHT_GRID
+
+        if grid_ready is None:
+            # Pre-load not done yet — skip penalty zones for this call
+            print(f"[POPULATION] Grid not ready yet, skipping zones for this route")
+            return []
+
+        try:
+            _POPULATION_ZONES_CACHE[tod] = build_population_penalty_zones(tod)
+        except Exception as exc:
+            print(f"[POPULATION] Failed to build penalty zones: {exc}")
+            _POPULATION_ZONES_CACHE[tod] = []
+
+    return _POPULATION_ZONES_CACHE[tod]
 
 def point_in_zone(lat, lon, zone):
     if zone.get("geometry", "circle") == "circle":
@@ -233,9 +270,10 @@ def build_field_graph(target_time_iso: str):
 
     weather_hard, weather_soft = build_weather_hazard_zones(target_time_iso)
     airspace = AIRSPACE_CACHE
+    population_soft = _get_population_zones(target_time_iso)
 
     hard_zones = list(LEGACY_NO_FLY_ZONES if USE_LEGACY_STATIC_OBSTACLES else []) + weather_hard + airspace
-    soft_zones = list(LEGACY_SLOW_ZONES if USE_LEGACY_STATIC_OBSTACLES else []) + weather_soft
+    soft_zones = list(LEGACY_SLOW_ZONES if USE_LEGACY_STATIC_OBSTACLES else []) + weather_soft + population_soft
 
     field_points = build_field_points(target_time_iso)
     airports = [
@@ -396,14 +434,17 @@ def _run_field_search(
 
             weather_hard, weather_soft = build_weather_hazard_zones(departure_time_iso)
             airspace = AIRSPACE_CACHE
+            population_soft = _get_population_zones(departure_time_iso)
 
             hard_zones = list(LEGACY_NO_FLY_ZONES if USE_LEGACY_STATIC_OBSTACLES else []) + weather_hard + airspace
-            soft_zones = list(LEGACY_SLOW_ZONES if USE_LEGACY_STATIC_OBSTACLES else []) + weather_soft
+            # Population zones inform graph cost but NOT polyline simplification —
+            # including them there is O(n² × zones) and causes hangs on large grids.
+            soft_zones_for_simplify = list(LEGACY_SLOW_ZONES if USE_LEGACY_STATIC_OBSTACLES else []) + weather_soft
 
             polyline = simplify_polyline_with_hard_and_soft_zones(
                 raw_polyline,
                 hard_zones,
-                soft_zones,
+                soft_zones_for_simplify,
             )
 
             return {

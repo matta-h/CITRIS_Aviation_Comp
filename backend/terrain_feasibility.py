@@ -41,8 +41,8 @@ def evaluate_terrain_for_polyline(
         sampled_altitude_profile = generate_altitude_profile(
             sampled_polyline,
             cruise_alt_ft=cruise_alt_ft,
-            climb_distance_miles=2.0,
-            descent_distance_miles=2.0,
+            climb_distance_miles=4.0,
+            descent_distance_miles=4.0,
             origin_alt_ft=origin_alt_ft,
             destination_alt_ft=destination_alt_ft,
         )

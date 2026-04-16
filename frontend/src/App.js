@@ -39,6 +39,22 @@ function weatherColor(status) {
   return "gray";
 }
 
+function populationColor(status) {
+  if (status === "very_high") return "#d93025";  // red
+  if (status === "high")      return "#f5821f";  // orange
+  if (status === "medium")    return "#f5c842";  // yellow
+  if (status === "low")       return "#74b87a";  // muted green
+  return null; // minimal — don't render
+}
+
+function populationRadius(status) {
+  if (status === "very_high") return 10;
+  if (status === "high")      return 8;
+  if (status === "medium")    return 6;
+  if (status === "low")       return 4;
+  return 0;
+}
+
 function gridRadiusFromWind(wind) {
   if (wind == null) return 4;
   if (wind < 5) return 4;
@@ -496,6 +512,8 @@ function App() {
   const [showWeather, setShowWeather] = useState(true);
   const [showPopulation, setShowPopulation] = useState(false);
   const [showFlights, setShowFlights] = useState(true);
+  const [populationGrid, setPopulationGrid] = useState([]);
+  const [populationLoaded, setPopulationLoaded] = useState(false);
 
   // ── Sim clock controls ──────────────────────
   const [isPlaying, setIsPlaying] = useState(false);
@@ -739,7 +757,29 @@ function App() {
     return () => clearTimeout(timer);
   }, [requestedGridTime, showWeatherGrid]);
 
-  // ── Derived data ────────────────────────────
+  // ── Population grid — lazy loaded once when first toggled on ──
+  // The TIF sampling is slow so we do it once and cache in state.
+  // time_of_day derived from current sim clock hour.
+  useEffect(() => {
+    if (!showPopulation || populationLoaded) return;
+
+    const hour = Math.floor(currentTimeMinutes / 60);
+    const tod = (hour >= 6 && hour < 20) ? "day" : "night";
+
+    fetch(`http://127.0.0.1:8000/population-grid?time_of_day=${tod}`)
+      .then((res) => {
+        if (!res.ok) throw new Error("Population fetch failed");
+        return res.json();
+      })
+      .then((data) => {
+        setPopulationGrid(Array.isArray(data) ? data : []);
+        setPopulationLoaded(true);
+      })
+      .catch((err) => {
+        console.warn("Population grid failed:", err);
+        setPopulationGrid([]);
+      });
+  }, [showPopulation, populationLoaded]);
   const nodeMap = useMemo(() => {
     const map = {};
     nodes.forEach((node) => { map[node.id] = node; });
@@ -951,6 +991,35 @@ function App() {
                       Wind: {wx.wind_speed_mph ?? "N/A"} mph<br />
                       Gusts: {wx.wind_gusts_mph ?? "N/A"} mph<br />
                       Precip: {wx.precipitation_mm ?? "N/A"} mm
+                    </Tooltip>
+                  </CircleMarker>
+                );
+              })}
+
+            {/* ── Population density grid ── */}
+            {showPopulation &&
+              populationGrid.map((pt, idx) => {
+                const color = populationColor(pt.status);
+                if (!color) return null; // skip "minimal" cells
+
+                const r = populationRadius(pt.status);
+                return (
+                  <CircleMarker
+                    key={`pop-${idx}`}
+                    center={[pt.lat, pt.lon]}
+                    radius={r}
+                    pathOptions={{
+                      color,
+                      fillColor: color,
+                      fillOpacity: 0.45,
+                      weight: 0,
+                    }}
+                  >
+                    <Tooltip direction="top" offset={[0, -8]} opacity={0.95} sticky>
+                      <b>Population Density</b><br />
+                      Density tier: {pt.status}<br />
+                      Ambient pop / cell: {pt.population.toLocaleString()}<br />
+                      Source: LandScan USA 2021
                     </Tooltip>
                   </CircleMarker>
                 );

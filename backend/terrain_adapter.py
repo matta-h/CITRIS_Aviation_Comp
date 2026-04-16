@@ -4,20 +4,38 @@ import math
 import glob
 from typing import List, Dict, Any, Tuple, Optional
 
+import numpy as np
 import rasterio
 
 DEM_FILES = glob.glob("backend/terrain_data/*.tif")
-DEM_DATASETS = [rasterio.open(path) for path in DEM_FILES]
+
+# Load each DEM tile and cache its band array in memory.
+# This avoids re-reading the raster from disk on every elevation sample.
+# Each tile is kept open so we can use its transform and bounds.
+DEM_DATASETS = []
+DEM_BANDS: List[np.ndarray] = []
+
+for _path in DEM_FILES:
+    # Skip the LandScan population TIFs — they are not elevation data
+    if "landscan" in _path.lower():
+        continue
+    try:
+        _ds = rasterio.open(_path)
+        _band = _ds.read(1)          # read once, keep in RAM
+        DEM_DATASETS.append(_ds)
+        DEM_BANDS.append(_band)
+    except Exception as _e:
+        print(f"[TERRAIN] Failed to load {_path}: {_e}")
 
 print(f"[TERRAIN] Loaded {len(DEM_DATASETS)} DEM tiles")
 
 
 def sample_elevation_ft(lat: float, lon: float) -> Optional[float]:
     """
-    Read terrain elevation from local DEM GeoTIFF tiles.
-    Returns elevation in feet.
+    Read terrain elevation from cached DEM band arrays.
+    Returns elevation in feet, or None if outside all tiles.
     """
-    for ds in DEM_DATASETS:
+    for ds, band in zip(DEM_DATASETS, DEM_BANDS):
         bounds = ds.bounds
 
         if not (bounds.left <= lon <= bounds.right and bounds.bottom <= lat <= bounds.top):
@@ -25,7 +43,6 @@ def sample_elevation_ft(lat: float, lon: float) -> Optional[float]:
 
         try:
             row, col = ds.index(lon, lat)
-            band = ds.read(1)
 
             if row < 0 or col < 0 or row >= band.shape[0] or col >= band.shape[1]:
                 continue

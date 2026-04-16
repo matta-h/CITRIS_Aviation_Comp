@@ -17,6 +17,7 @@ from backend.airspace_adapter import get_airspace_geojson_for_frontend
 from backend.terrain_feasibility import evaluate_terrain_for_polyline
 from backend.airspace_legacy import load_airspace
 from backend.routing import build_weather_hazard_zones
+from backend.population_adapter import get_population_grid as _get_population_grid
 
 
 WEATHER_CACHE = {}
@@ -65,6 +66,12 @@ def get_obstacles(target_time: str | None = None):
         "weather_hard": weather_hard,
         "weather_soft": weather_soft,
     }
+
+@app.get("/population-grid")
+def get_population_grid_endpoint(time_of_day: str = "day"):
+    if time_of_day not in {"day", "night"}:
+        raise HTTPException(status_code=400, detail="time_of_day must be 'day' or 'night'")
+    return _get_population_grid(time_of_day)
 
 @app.post("/terrain-check")
 def terrain_check(payload: dict):
