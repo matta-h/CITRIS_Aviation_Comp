@@ -34,6 +34,13 @@ AIRPORT_INFRASTRUCTURE_COST_PER_FLIGHT_USD = 65.00
 UC_NODES = {"UCB", "UCSC", "UCD", "UCM"}
 AIRPORT_NODES = {"KSQL", "KNUQ", "KLVK", "KCVH", "KSNS", "KOAR"}
 
+# Pad capacity per site (ground slots available simultaneously)
+# UC campuses: 3 pads (1 active + 2 charging); airports: 4 pads
+PAD_CAPACITY: Dict[str, int] = {
+    "UCB": 3, "UCSC": 3, "UCD": 3, "UCM": 3,
+    "KSQL": 4, "KNUQ": 4, "KLVK": 4, "KCVH": 4, "KSNS": 4, "KOAR": 4,
+}
+
 ROUTE_BASE = "http://127.0.0.1:8000"
 
 
@@ -43,11 +50,19 @@ class Aircraft:
     def __init__(self, aircraft_id: str, home_port: str) -> None:
         self.id = aircraft_id
         self.home_port = home_port
-        self.current_port = home_port
-        self.available_at_minute = 360   # 6:00am
+        self.current_port = home_port   # ground position — only updates on landing
+        self.in_flight = False
+        self.dest_port: Optional[str] = None
+        self.arrival_at_minute = 0      # minute this aircraft touches down
+        self.available_at_minute = 360  # available after landing + turnaround (6:00am start)
         self.total_flight_minutes = 0.0
         self.total_flights = 0
         self.total_distance_miles = 0.0
+
+
+def _ground_count(fleet: List["Aircraft"], port: str) -> int:
+    """Aircraft currently on the ground at this port (not in flight)."""
+    return sum(1 for a in fleet if a.current_port == port and not a.in_flight)
 
 
 def _build_fleet() -> List[Aircraft]:
@@ -78,8 +93,9 @@ def _compute_costs(
     total_distance_miles: float,
     ticket_price: float,
     passengers: int,
+    pilot_enabled: bool = True,
 ) -> dict:
-    cost_pilot = (total_time_minutes / 60.0) * PILOT_HOURLY_RATE_USD
+    cost_pilot = (total_time_minutes / 60.0) * PILOT_HOURLY_RATE_USD if pilot_enabled else 0.0
 
     energy_kwh = ENERGY_KWH_PER_FLIGHT_REFERENCE * (total_distance_miles / REFERENCE_DISTANCE_MILES)
     energy_kwh = max(20.0, min(energy_kwh, 180.0))
@@ -115,6 +131,9 @@ def run_daily_simulation(
     demand_scale: float = 1.0,
     start_hour: int = 6,
     end_hour: int = 22,
+    pilot_enabled: bool = True,
+    battery_min_pct: float = 20.0,
+    turnaround_base_minutes: int = 20,
 ) -> dict:
     sim_start_wall = time.time()
 
@@ -159,6 +178,14 @@ def run_daily_simulation(
         hour = current_minute // 60
         current_iso = _minute_to_iso(date, current_minute)
 
+        # Step 0: process landings — update current_port for any aircraft that
+        # has now touched down (arrival_at_minute has passed)
+        for a in fleet:
+            if a.in_flight and a.arrival_at_minute <= current_minute:
+                a.current_port = a.dest_port
+                a.in_flight = False
+                a.dest_port = None
+
         # Step 1: accumulate demand for all pairs
         for (origin, dest) in demand_acc:
             demand_acc[(origin, dest)] += get_demand_for_timeslot(
@@ -180,15 +207,24 @@ def run_daily_simulation(
             eligible.sort(key=lambda x: x[1], reverse=True)
 
             for dest, acc_demand in eligible:
-                # Find available aircraft at this origin not yet used this step
+                # Find aircraft on the ground at origin, turnaround complete, not yet used this step
                 candidates = [
                     a for a in fleet
                     if a.current_port == origin
+                    and not a.in_flight
                     and a.available_at_minute <= current_minute
                     and a.id not in dispatched_this_step
                 ]
                 if not candidates:
                     break
+
+                # Check destination pad capacity before committing
+                if _ground_count(fleet, dest) >= PAD_CAPACITY.get(dest, 4):
+                    print(
+                        f"[SIM] {current_iso[11:16]} {origin}->{dest} held "
+                        f"(dest {dest} at pad capacity)"
+                    )
+                    continue
 
                 aircraft = min(candidates, key=lambda a: a.available_at_minute)
 
@@ -229,11 +265,26 @@ def run_daily_simulation(
                 exchange_stop = exchange_stops[0] if exchange_stops else None
                 route_class = route.get("route_class", "unknown")
 
-                passengers = max(1, min(4, int(floor(acc_demand))))
-                turnaround = 20 + (15 if total_dist_mi > 60 else 0)
+                # Skip dispatch if route would drain battery below minimum
+                from backend.fleet import battery_cost_pct
+                if battery_cost_pct(total_dist_mi) > (100.0 - battery_min_pct):
+                    print(
+                        f"[SIM] {current_iso[11:16]} {origin}->{dest} skipped "
+                        f"(battery infeasible at {total_dist_mi:.1f} mi)"
+                    )
+                    demand_acc[(origin, dest)] = 0.0
+                    continue
 
-                aircraft.available_at_minute = current_minute + ceil(total_time_min) + turnaround
-                aircraft.current_port = dest
+                passengers = max(1, min(4, int(floor(acc_demand))))
+                turnaround = turnaround_base_minutes + (15 if total_dist_mi > 60 else 0)
+                arrival_minute = current_minute + ceil(total_time_min)
+
+                # Aircraft leaves the origin pad immediately but doesn't
+                # occupy the destination pad until it physically lands.
+                aircraft.in_flight = True
+                aircraft.dest_port = dest
+                aircraft.arrival_at_minute = arrival_minute
+                aircraft.available_at_minute = arrival_minute + turnaround
                 aircraft.total_flight_minutes += total_time_min
                 aircraft.total_flights += 1
                 aircraft.total_distance_miles += total_dist_mi
@@ -243,7 +294,7 @@ def run_daily_simulation(
 
                 arrival_iso = _minute_to_iso(date, current_minute + ceil(total_time_min))
                 wx_status = _weather_status(origin, current_iso)
-                financials = _compute_costs(origin, total_time_min, total_dist_mi, ticket_price, passengers)
+                financials = _compute_costs(origin, total_time_min, total_dist_mi, ticket_price, passengers, pilot_enabled)
 
                 flight_id_counter += 1
                 record = {
@@ -291,7 +342,13 @@ def run_daily_simulation(
 
     return {
         "date": date,
-        "parameters": {"ticket_price": ticket_price, "demand_scale": demand_scale},
+        "parameters": {
+            "ticket_price": ticket_price,
+            "demand_scale": demand_scale,
+            "pilot_enabled": pilot_enabled,
+            "battery_min_pct": battery_min_pct,
+            "turnaround_base_minutes": turnaround_base_minutes,
+        },
         "flight_log": flight_log,
         "site_summaries": site_summaries,
         "network_summary": network_summary,
@@ -371,8 +428,9 @@ def _build_site_summaries(
             "aircraft_positions_at_eod": [
                 {
                     "aircraft_id": a.id,
-                    "current_port": a.current_port,
-                    "is_away_from_home": a.current_port != a.home_port,
+                    "current_port": a.dest_port if a.in_flight else a.current_port,
+                    "in_flight_at_eod": a.in_flight,
+                    "is_away_from_home": (a.dest_port if a.in_flight else a.current_port) != a.home_port,
                 }
                 for a in site_aircraft
             ],

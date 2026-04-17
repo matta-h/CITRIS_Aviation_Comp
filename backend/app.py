@@ -222,6 +222,9 @@ def simulate_day(payload: dict):
     demand_scale = float(payload.get("demand_scale", 1.0))
     start_hour = int(payload.get("start_hour", 6))
     end_hour = int(payload.get("end_hour", 22))
+    pilot_enabled = bool(payload.get("pilot_enabled", True))
+    battery_min_pct = float(payload.get("battery_min_pct", 20.0))
+    turnaround_base_minutes = int(payload.get("turnaround_base_minutes", 20))
 
     return run_daily_simulation(
         date=date,
@@ -229,4 +232,7 @@ def simulate_day(payload: dict):
         demand_scale=demand_scale,
         start_hour=start_hour,
         end_hour=end_hour,
+        pilot_enabled=pilot_enabled,
+        battery_min_pct=battery_min_pct,
+        turnaround_base_minutes=turnaround_base_minutes,
     )

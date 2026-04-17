@@ -556,6 +556,12 @@ function App() {
   const [isPreloading, setIsPreloading] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
   const [simSummary, setSimSummary] = useState(null);
+  // Sim config
+  const [pilotEnabled, setPilotEnabled] = useState(true);
+  const [batteryMinPct, setBatteryMinPct] = useState(20);
+  const [ticketPrice, setTicketPrice] = useState(100);
+  const [demandScale, setDemandScale] = useState(1.0);
+  const [turnaroundMinutes, setTurnaroundMinutes] = useState(20);
   const [showWeather, setShowWeather] = useState(true);
   const [showPopulation, setShowPopulation] = useState(false);
   const [showTerrain, setShowTerrain] = useState(false);
@@ -643,10 +649,13 @@ function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         date: selectedDate,
-        ticket_price: 100.0,
-        demand_scale: 1.0,
+        ticket_price: ticketPrice,
+        demand_scale: demandScale,
         start_hour: startHour,
         end_hour: endHour,
+        pilot_enabled: pilotEnabled,
+        battery_min_pct: batteryMinPct,
+        turnaround_base_minutes: turnaroundMinutes,
       }),
     })
       .then((res) => {
@@ -1486,6 +1495,17 @@ function App() {
         setIsPlaying={handleSetPlaying}
         simSpeed={simSpeed}
         setSimSpeed={handleSetSimSpeed}
+        // Sim config
+        pilotEnabled={pilotEnabled}
+        setPilotEnabled={setPilotEnabled}
+        batteryMinPct={batteryMinPct}
+        setBatteryMinPct={setBatteryMinPct}
+        ticketPrice={ticketPrice}
+        setTicketPrice={setTicketPrice}
+        demandScale={demandScale}
+        setDemandScale={setDemandScale}
+        turnaroundMinutes={turnaroundMinutes}
+        setTurnaroundMinutes={setTurnaroundMinutes}
       />
     </div>
   );

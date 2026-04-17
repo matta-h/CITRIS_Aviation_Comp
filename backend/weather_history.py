@@ -1,8 +1,20 @@
 from __future__ import annotations
 
 from typing import Dict, Optional, Tuple, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as date_type
 import requests
+
+
+def _weather_base_url(day_str: str) -> str:
+    """Return the correct Open-Meteo base URL for the given date.
+    Historical archive only covers dates up to ~5 days ago; use the
+    forecast API for recent or future dates."""
+    today = date_type.today()
+    target = date_type.fromisoformat(day_str)
+    # Archive API lags ~5 days; use forecast for anything within that window
+    if (today - target).days >= 5:
+        return "https://archive-api.open-meteo.com/v1/archive"
+    return "https://api.open-meteo.com/v1/forecast"
 
 # -----------------------------
 # Thresholds (same as before)
@@ -58,9 +70,10 @@ def hourly_time_strings_for_range(date_str: str, start_hour: int, end_hour: int)
 def fetch_historical_weather_day_for_node(node: dict, day_str: str) -> dict:
     """
     Fetch one full day of hourly weather for a node in a single API call.
+    Uses historical archive for past dates and forecast API for future dates.
     """
     url = (
-        "https://archive-api.open-meteo.com/v1/archive"
+        f"{_weather_base_url(day_str)}"
         f"?latitude={node['lat']}"
         f"&longitude={node['lon']}"
         f"&start_date={day_str}"
@@ -136,7 +149,7 @@ def fetch_historical_weather_for_node(node: dict, target_time_iso: str) -> dict:
         return WEATHER_CACHE[cache_key]
 
     url = (
-        "https://archive-api.open-meteo.com/v1/archive"
+        f"{_weather_base_url(day_str)}"
         f"?latitude={node['lat']}"
         f"&longitude={node['lon']}"
         f"&start_date={day_str}"
@@ -158,7 +171,7 @@ def fetch_historical_weather_for_node(node: dict, target_time_iso: str) -> dict:
     precip = data.get("precipitation", [])
 
     if not times:
-        raise ValueError("No historical weather data returned")
+        raise ValueError("No weather data returned")
 
     idx = nearest_hour_index(times, target_time_iso)
 
