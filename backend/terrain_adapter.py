@@ -7,6 +7,52 @@ from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 import rasterio
 
+# NorCal bounding box for terrain grid sampling
+_GRID_LAT_MIN, _GRID_LAT_MAX = 36.5, 38.9
+_GRID_LON_MIN, _GRID_LON_MAX = -122.8, -120.2
+_GRID_LAT_STEP = 0.05
+_GRID_LON_STEP = 0.06
+
+_TERRAIN_GRID: Optional[List[Dict[str, Any]]] = None
+
+
+def _classify_elevation(elev_ft: float) -> str:
+    if elev_ft < 200:
+        return "flat"
+    if elev_ft < 800:
+        return "low"
+    if elev_ft < 2000:
+        return "medium"
+    if elev_ft < 4000:
+        return "high"
+    return "alpine"
+
+
+def get_terrain_grid() -> List[Dict[str, Any]]:
+    global _TERRAIN_GRID
+    if _TERRAIN_GRID is not None:
+        return _TERRAIN_GRID
+
+    points: List[Dict[str, Any]] = []
+    lat = _GRID_LAT_MIN
+    while lat <= _GRID_LAT_MAX:
+        lon = _GRID_LON_MIN
+        while lon <= _GRID_LON_MAX:
+            elev = sample_elevation_ft(lat, lon)
+            if elev is not None:
+                points.append({
+                    "lat": round(lat, 4),
+                    "lon": round(lon, 4),
+                    "elevation_ft": round(elev, 1),
+                    "tier": _classify_elevation(elev),
+                })
+            lon += _GRID_LON_STEP
+        lat += _GRID_LAT_STEP
+
+    _TERRAIN_GRID = points
+    print(f"[TERRAIN] Grid sampled: {len(points)} points")
+    return _TERRAIN_GRID
+
 DEM_FILES = glob.glob("backend/terrain_data/*.tif")
 
 # Load each DEM tile and cache its band array in memory.

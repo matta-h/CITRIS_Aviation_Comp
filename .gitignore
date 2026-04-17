@@ -49,3 +49,5 @@ exports/
 
 # Optional: ignore local data dumps
 data/raw/"backend/.env" 
+
+*.txt

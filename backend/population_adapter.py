@@ -26,16 +26,15 @@ LAT_MAX =  38.88125
 LON_MIN = -122.6111
 LON_MAX = -120.0661
 
-# Sampling resolution — one point every ~5 miles
-LAT_SPACING = 0.07   # ~5 miles
-LON_SPACING = 0.09   # ~5 miles
+# Sampling resolution — one point every ~1 mile
+LAT_SPACING = 0.015  # ~1 mile
+LON_SPACING = 0.018  # ~1 mile
 
 # Population density thresholds (people per 90m cell, LandScan ambient)
-# Calibrated for NorCal: Bay Area cores run 2000–8000+, rural Central Valley < 10
-THRESHOLD_LOW       =   50   # rural / open land
-THRESHOLD_MEDIUM    =  300   # suburban
-THRESHOLD_HIGH      = 1500   # dense suburban / urban
-THRESHOLD_VERY_HIGH = 5000   # downtown / dense urban core
+THRESHOLD_LOW       =   15   # rural fringe
+THRESHOLD_MEDIUM    =   60   # suburban
+THRESHOLD_HIGH      =  300   # dense suburban / urban
+THRESHOLD_VERY_HIGH = 1000   # dense urban core
 
 # Routing soft penalty (minutes added to route score per zone intersection)
 # Kept modest — population avoidance is a tiebreaker, not a hard constraint
@@ -130,11 +129,14 @@ def _sample_tif(tif_path: str) -> List[Dict]:
                         if value < 0:
                             continue
 
+                        status = _classify(value)
+                        if status == "minimal":
+                            continue
                         results.append({
                             "lat": round(float(lat), 5),
                             "lon": round(float(lon), 5),
                             "population": int(value),
-                            "status": _classify(value),
+                            "status": status,
                         })
 
                     except Exception:

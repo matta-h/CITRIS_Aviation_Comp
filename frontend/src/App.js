@@ -8,7 +8,8 @@ import {
   Polyline,
   CircleMarker,
   Circle,
-  Polygon
+  Polygon,
+  Rectangle,
 } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import "leaflet-defaulticon-compatibility";
@@ -39,21 +40,35 @@ function weatherColor(status) {
   return "gray";
 }
 
-function populationColor(status) {
-  if (status === "very_high") return "#d93025";  // red
-  if (status === "high")      return "#f5821f";  // orange
-  if (status === "medium")    return "#f5c842";  // yellow
-  if (status === "low")       return "#74b87a";  // muted green
-  return null; // minimal — don't render
+function terrainColor(tier) {
+  if (tier === "flat")   return "#4fc3f7"; // light blue
+  if (tier === "low")    return "#66bb6a"; // green
+  if (tier === "medium") return "#ffd54f"; // amber
+  if (tier === "high")   return "#ff8a65"; // orange
+  if (tier === "alpine") return "#e57373"; // red
+  return null;
 }
 
-function populationRadius(status) {
-  if (status === "very_high") return 10;
-  if (status === "high")      return 8;
-  if (status === "medium")    return 6;
-  if (status === "low")       return 4;
+function terrainRadius(tier) {
+  if (tier === "flat")   return 3;
+  if (tier === "low")    return 3;
+  if (tier === "medium") return 4;
+  if (tier === "high")   return 4;
+  if (tier === "alpine") return 5;
   return 0;
 }
+
+// Heatmap: dense = red, less dense = orange/amber, skip low/minimal
+function populationHeatColor(status) {
+  if (status === "very_high") return { color: "#cc0000", opacity: 0.82 };
+  if (status === "high")      return { color: "#ff4500", opacity: 0.72 };
+  if (status === "medium")    return { color: "#ff8c00", opacity: 0.60 };
+  return null;
+}
+
+// Half-extents matching population_adapter.py grid spacing (0.015° lat, 0.018° lon)
+const POP_HALF_LAT = 0.0075;
+const POP_HALF_LON = 0.009;
 
 function gridRadiusFromWind(wind) {
   if (wind == null) return 4;
@@ -539,11 +554,16 @@ function App() {
   const [endHour, setEndHour] = useState(22);
   const [currentTimeMinutes, setCurrentTimeMinutes] = useState(8 * 60);
   const [isPreloading, setIsPreloading] = useState(false);
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [simSummary, setSimSummary] = useState(null);
   const [showWeather, setShowWeather] = useState(true);
   const [showPopulation, setShowPopulation] = useState(false);
+  const [showTerrain, setShowTerrain] = useState(false);
   const [showFlights, setShowFlights] = useState(true);
   const [populationGrid, setPopulationGrid] = useState([]);
   const [populationLoaded, setPopulationLoaded] = useState(false);
+  const [terrainGrid, setTerrainGrid] = useState([]);
+  const [terrainLoaded, setTerrainLoaded] = useState(false);
   const [fleet, setFleet] = useState([]);
 
   // ── Sim clock controls ──────────────────────
@@ -610,6 +630,90 @@ function App() {
       })
       .catch((err) => console.warn("Preload failed", err))
       .finally(() => setIsPreloading(false));
+  };
+
+  const handleSimulateDay = () => {
+    if (!selectedDate) return;
+    setIsSimulating(true);
+    setSimSummary(null);
+    setIsPlaying(false);
+
+    fetch("http://127.0.0.1:8000/simulate-day", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        date: selectedDate,
+        ticket_price: 100.0,
+        demand_scale: 1.0,
+        start_hour: startHour,
+        end_hour: endHour,
+      }),
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error("Simulation failed");
+        return res.json();
+      })
+      .then((result) => {
+        const fmtTime = (iso) => iso.slice(11, 16);
+
+        const simFlights = (result.flight_log || [])
+          .filter((f) => f.route_snapshot?.polyline)
+          .map((f, idx) => {
+            const rd = f.route_snapshot;
+            const depParts = f.departure_time_iso.slice(11, 16).split(":");
+            const depMin = parseInt(depParts[0]) * 60 + parseInt(depParts[1]);
+            const arrParts = f.arrival_time_iso.slice(11, 16).split(":");
+            const arrMin = parseInt(arrParts[0]) * 60 + parseInt(arrParts[1]);
+            const leg1Min =
+              Array.isArray(rd.legs) && rd.legs[0]?.distance_miles != null
+                ? (rd.legs[0].distance_miles / 120) * 60
+                : 0;
+            const leg2Min =
+              Array.isArray(rd.legs) && rd.legs[1]?.distance_miles != null
+                ? (rd.legs[1].distance_miles / 120) * 60
+                : 0;
+            const stopId = rd.exchange_stops?.[0];
+            const stopNode = stopId ? nodeMap[stopId] : null;
+
+            return {
+              id: `sim-${f.flight_id}-${idx}`,
+              start: f.origin,
+              end: f.destination,
+              routeData: rd,
+              risk:
+                f.route_class === "orange"
+                  ? "High"
+                  : f.route_class === "yellow" || f.route_class === "detour"
+                  ? "Medium"
+                  : "Low",
+              distanceText: `${Number(f.total_distance_miles).toFixed(1)} mi`,
+              etaText: `${Math.round(f.total_time_minutes)} min`,
+              departureLabel: fmtTime(f.departure_time_iso),
+              arrivalLabel: fmtTime(f.arrival_time_iso),
+              vtolId: f.aircraft_id,
+              vtolBatteryCostPct: null,
+              departureTimeMinutes: depMin,
+              isExchange: f.was_exchange,
+              exchangeDelayMinutes: rd.selection_notes?.exchange_delay_min ?? 30,
+              leg1Minutes: leg1Min,
+              leg2Minutes: leg2Min,
+              exchangeStopPosition: stopNode ? [stopNode.lat, stopNode.lon] : null,
+              // sim-only metadata
+              simPassengers: f.passengers,
+              simProfit: f.profit,
+              simRevenue: f.revenue,
+            };
+          });
+
+        setActiveFlights(simFlights);
+        setCurrentTimeMinutes(startHour * 60);
+        setSimSummary(result.network_summary);
+      })
+      .catch((err) => {
+        console.warn("Simulation failed:", err);
+        setSimSummary({ error: "Simulation failed — check backend console." });
+      })
+      .finally(() => setIsSimulating(false));
   };
 
   // ── Data fetching ───────────────────────────
@@ -822,6 +926,26 @@ function App() {
         setPopulationGrid([]);
       });
   }, [showPopulation, populationLoaded]);
+
+  // ── Terrain grid — lazy loaded once when first toggled on ──
+  useEffect(() => {
+    if (!showTerrain || terrainLoaded) return;
+
+    fetch("http://127.0.0.1:8000/terrain-grid")
+      .then((res) => {
+        if (!res.ok) throw new Error("Terrain fetch failed");
+        return res.json();
+      })
+      .then((data) => {
+        setTerrainGrid(Array.isArray(data) ? data : []);
+        setTerrainLoaded(true);
+      })
+      .catch((err) => {
+        console.warn("Terrain grid failed:", err);
+        setTerrainGrid([]);
+      });
+  }, [showTerrain, terrainLoaded]);
+
   // ── Fleet polling — debounced with sim clock ────────────────────
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -947,6 +1071,12 @@ function App() {
   // ── Render ──────────────────────────────────
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100%" }}>
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 0.2; transform: scale(0.8); }
+          50% { opacity: 1; transform: scale(1.2); }
+        }
+      `}</style>
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
         <LeftPanel
           nodes={nodes}
@@ -1093,32 +1223,60 @@ function App() {
                 );
               })}
 
-            {/* ── Population density grid ── */}
-            {showPopulation &&
-              populationGrid.map((pt, idx) => {
-                const color = populationColor(pt.status);
-                if (!color) return null; // skip "minimal" cells
-
-                const r = populationRadius(pt.status);
+            {/* ── Terrain elevation grid ── */}
+            {showTerrain &&
+              terrainGrid.map((pt, idx) => {
+                const color = terrainColor(pt.tier);
+                if (!color) return null;
+                const r = terrainRadius(pt.tier);
                 return (
                   <CircleMarker
-                    key={`pop-${idx}`}
+                    key={`terrain-${idx}`}
                     center={[pt.lat, pt.lon]}
                     radius={r}
                     pathOptions={{
                       color,
                       fillColor: color,
-                      fillOpacity: 0.45,
+                      fillOpacity: 0.5,
                       weight: 0,
                     }}
                   >
                     <Tooltip direction="top" offset={[0, -8]} opacity={0.95} sticky>
+                      <b>Terrain Elevation</b><br />
+                      Elevation: {pt.elevation_ft.toLocaleString()} ft<br />
+                      Tier: {pt.tier}<br />
+                      Source: USGS 1/3 arc-second DEM
+                    </Tooltip>
+                  </CircleMarker>
+                );
+              })}
+
+            {/* ── Population density heatmap ── */}
+            {showPopulation &&
+              populationGrid.map((pt, idx) => {
+                const heat = populationHeatColor(pt.status);
+                if (!heat) return null;
+                const bounds = [
+                  [pt.lat - POP_HALF_LAT, pt.lon - POP_HALF_LON],
+                  [pt.lat + POP_HALF_LAT, pt.lon + POP_HALF_LON],
+                ];
+                return (
+                  <Rectangle
+                    key={`pop-${idx}`}
+                    bounds={bounds}
+                    pathOptions={{
+                      stroke: false,
+                      fillColor: heat.color,
+                      fillOpacity: heat.opacity,
+                    }}
+                  >
+                    <Tooltip direction="top" offset={[0, -8]} opacity={0.95} sticky>
                       <b>Population Density</b><br />
-                      Density tier: {pt.status}<br />
+                      Tier: {pt.status}<br />
                       Ambient pop / cell: {pt.population.toLocaleString()}<br />
                       Source: LandScan USA 2021
                     </Tooltip>
-                  </CircleMarker>
+                  </Rectangle>
                 );
               })}
 
@@ -1237,6 +1395,34 @@ function App() {
             </div>
           )}
 
+          {isSimulating && (
+            <div
+              style={{
+                position: "absolute", inset: 0, background: "rgba(3,15,40,0.82)",
+                display: "flex", flexDirection: "column",
+                alignItems: "center", justifyContent: "center",
+                zIndex: 1000, color: "white", pointerEvents: "all", gap: "14px",
+              }}
+            >
+              <div style={{ fontSize: "26px", fontWeight: "bold", letterSpacing: "0.5px" }}>
+                Simulating day...
+              </div>
+              <div style={{ fontSize: "14px", opacity: 0.75, maxWidth: "380px", textAlign: "center" }}>
+                Planning routes using live weather forecasts, population demand, and terrain.
+                This takes 2–6 minutes.
+              </div>
+              <div style={{ marginTop: "8px", display: "flex", gap: "6px" }}>
+                {[0,1,2].map((i) => (
+                  <div key={i} style={{
+                    width: 10, height: 10, borderRadius: "50%",
+                    background: "white", opacity: 0.85,
+                    animation: `pulse 1.2s ease-in-out ${i * 0.4}s infinite`,
+                  }} />
+                ))}
+              </div>
+            </div>
+          )}
+
           {isRouting && (
             <div
               style={{
@@ -1274,6 +1460,9 @@ function App() {
       <BottomToolbar
         initialize={handleInitialize}
         isPreloading={isPreloading}
+        simulateDay={handleSimulateDay}
+        isSimulating={isSimulating}
+        simSummary={simSummary}
         selectedDate={selectedDate}
         setSelectedDate={setSelectedDate}
         startHour={startHour}
@@ -1286,6 +1475,8 @@ function App() {
         setShowWeather={setShowWeather}
         showPopulation={showPopulation}
         setShowPopulation={setShowPopulation}
+        showTerrain={showTerrain}
+        setShowTerrain={setShowTerrain}
         showFlights={showFlights}
         setShowFlights={setShowFlights}
         showHazardRegions={showHazardRegions}

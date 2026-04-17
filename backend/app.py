@@ -18,6 +18,7 @@ from backend.terrain_feasibility import evaluate_terrain_for_polyline
 from backend.airspace_legacy import load_airspace
 from backend.routing import build_weather_hazard_zones
 from backend.population_adapter import get_population_grid as _get_population_grid
+from backend.terrain_adapter import get_terrain_grid as _get_terrain_grid
 from backend.fleet import (
     assign_vtol, battery_cost_pct,
     get_fleet_snapshot, get_fleet_params, update_fleet_params, reset_fleet,
@@ -133,7 +134,12 @@ def get_obstacles(target_time: str | None = None):
 def get_population_grid_endpoint(time_of_day: str = "day"):
     if time_of_day not in {"day", "night"}:
         raise HTTPException(status_code=400, detail="time_of_day must be 'day' or 'night'")
-    return _get_population_grid(time_of_day)
+    grid = _get_population_grid(time_of_day)
+    return [pt for pt in grid if pt["status"] not in ("minimal", "low")]
+
+@app.get("/terrain-grid")
+def get_terrain_grid_endpoint():
+    return _get_terrain_grid()
 
 @app.post("/terrain-check")
 def terrain_check(payload: dict):
@@ -201,3 +207,26 @@ def weather_grid_day_preload(payload: dict):
 @app.get("/weather-grid-day-preload-status")
 def weather_grid_day_preload_status():
     return get_preload_status()
+
+
+@app.post("/simulate-day")
+def simulate_day(payload: dict):
+    # Import here to avoid circular imports at module load time
+    from backend.daily_sim import run_daily_simulation
+
+    date = payload.get("date")
+    if not date:
+        raise HTTPException(status_code=400, detail="Missing 'date'")
+
+    ticket_price = float(payload.get("ticket_price", 100.0))
+    demand_scale = float(payload.get("demand_scale", 1.0))
+    start_hour = int(payload.get("start_hour", 6))
+    end_hour = int(payload.get("end_hour", 22))
+
+    return run_daily_simulation(
+        date=date,
+        ticket_price=ticket_price,
+        demand_scale=demand_scale,
+        start_hour=start_hour,
+        end_hour=end_hour,
+    )

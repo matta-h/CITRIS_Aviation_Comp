@@ -11,12 +11,17 @@ export default function BottomToolbar({
   setShowWeather,
   showPopulation,
   setShowPopulation,
+  showTerrain,
+  setShowTerrain,
   showFlights,
   setShowFlights,
   showHazardRegions,
   setShowHazardRegions,
   initialize,
   isPreloading,
+  simulateDay,
+  isSimulating,
+  simSummary,
   // Sim clock
   isPlaying,
   setIsPlaying,
@@ -31,7 +36,7 @@ export default function BottomToolbar({
   return (
     <div
       style={{
-        height: "120px",
+        height: simSummary ? "148px" : "120px",
         background: "#031f47",
         borderTop: "2px solid #0c3f73",
         padding: "10px 16px",
@@ -84,6 +89,7 @@ export default function BottomToolbar({
             />
             <button
               onClick={initialize}
+              disabled={isPreloading || isSimulating}
               style={{
                 marginLeft: "8px",
                 padding: "4px 8px",
@@ -91,10 +97,28 @@ export default function BottomToolbar({
                 background: "#1e6ca1",
                 color: "white",
                 border: "none",
-                cursor: "pointer",
+                cursor: isPreloading || isSimulating ? "not-allowed" : "pointer",
+                opacity: isPreloading || isSimulating ? 0.6 : 1,
               }}
             >
               {isPreloading ? "Loading..." : "Initialize"}
+            </button>
+            <button
+              onClick={simulateDay}
+              disabled={isSimulating || isPreloading}
+              style={{
+                marginLeft: "6px",
+                padding: "4px 10px",
+                borderRadius: "6px",
+                background: isSimulating ? "#555" : "#2e7d32",
+                color: "white",
+                border: "none",
+                cursor: isSimulating || isPreloading ? "not-allowed" : "pointer",
+                fontWeight: "bold",
+                opacity: isSimulating || isPreloading ? 0.7 : 1,
+              }}
+            >
+              {isSimulating ? "Simulating..." : "Simulate Day"}
             </button>
           </div>
         </div>
@@ -130,6 +154,15 @@ export default function BottomToolbar({
           <label>
             <input
               type="checkbox"
+              checked={showTerrain}
+              onChange={() => setShowTerrain(!showTerrain)}
+              style={{ marginRight: "6px" }}
+            />
+            Terrain
+          </label>
+          <label>
+            <input
+              type="checkbox"
               checked={showFlights}
               onChange={() => setShowFlights(!showFlights)}
               style={{ marginRight: "6px" }}
@@ -138,6 +171,33 @@ export default function BottomToolbar({
           </label>
         </div>
       </div>
+
+      {/* Simulation summary strip */}
+      {simSummary && !simSummary.error && (
+        <div style={{
+          display: "flex", gap: "18px", alignItems: "center",
+          fontSize: "12px", background: "rgba(0,0,0,0.25)",
+          borderRadius: "6px", padding: "4px 10px", flexWrap: "wrap",
+        }}>
+          <span style={{ color: "#64b5f6", fontWeight: "bold" }}>Sim Results:</span>
+          <span>{simSummary.total_flights_network} flights</span>
+          <span>{simSummary.total_passengers_network} pax</span>
+          <span style={{ color: simSummary.total_profit_network >= 0 ? "#81c784" : "#e57373" }}>
+            {simSummary.total_profit_network >= 0 ? "+" : ""}${simSummary.total_profit_network?.toLocaleString(undefined, { maximumFractionDigits: 0 })} profit
+          </span>
+          {simSummary.break_even_ticket_price && (
+            <span style={{ opacity: 0.8 }}>Break-even: ${simSummary.break_even_ticket_price}</span>
+          )}
+          {simSummary.busiest_route && (
+            <span style={{ opacity: 0.8 }}>
+              Busiest: {simSummary.busiest_route.origin}→{simSummary.busiest_route.destination} ({simSummary.busiest_route.flight_count}x)
+            </span>
+          )}
+        </div>
+      )}
+      {simSummary?.error && (
+        <div style={{ fontSize: "12px", color: "#ef9a9a" }}>{simSummary.error}</div>
+      )}
 
       {/* Bottom row: timeline scrubber + play controls */}
       <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
