@@ -549,7 +549,7 @@ function App() {
   const [showGridPoints, setShowGridPoints] = useState(true);
   const [selectedType, setSelectedType] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null);
-  const [selectedDate, setSelectedDate] = useState("2024-01-15");
+  const [selectedDate, setSelectedDate] = useState("2024-02-05");
   const [startHour, setStartHour] = useState(6);
   const [endHour, setEndHour] = useState(22);
   const [currentTimeMinutes, setCurrentTimeMinutes] = useState(8 * 60);
@@ -557,11 +557,13 @@ function App() {
   const [isSimulating, setIsSimulating] = useState(false);
   const [simSummary, setSimSummary] = useState(null);
   // Sim config
-  const [pilotEnabled, setPilotEnabled] = useState(true);
+  const [pilotEnabled, setPilotEnabled] = useState(false);
   const [batteryMinPct, setBatteryMinPct] = useState(20);
   const [ticketPrice, setTicketPrice] = useState(100);
   const [demandScale, setDemandScale] = useState(1.0);
   const [turnaroundMinutes, setTurnaroundMinutes] = useState(20);
+  const [minPassengers, setMinPassengers] = useState(1);
+  const [portConfig, setPortConfig] = useState(null);
   const [showWeather, setShowWeather] = useState(true);
   const [showPopulation, setShowPopulation] = useState(false);
   const [showTerrain, setShowTerrain] = useState(false);
@@ -656,6 +658,7 @@ function App() {
         pilot_enabled: pilotEnabled,
         battery_min_pct: batteryMinPct,
         turnaround_base_minutes: turnaroundMinutes,
+        min_passengers: minPassengers,
       }),
     })
       .then((res) => {
@@ -723,6 +726,41 @@ function App() {
         setSimSummary({ error: "Simulation failed — check backend console." });
       })
       .finally(() => setIsSimulating(false));
+  };
+
+  // ── Port config fetch ───────────────────────
+  useEffect(() => {
+    fetch("http://127.0.0.1:8000/fleet/params")
+      .then((res) => res.json())
+      .then((data) => setPortConfig(data.port_config ?? null))
+      .catch(() => {});
+  }, []);
+
+  const handleApplyPortConfig = (localConfig) => {
+    const port_config = {};
+    for (const [portId, vals] of Object.entries(localConfig)) {
+      const total = Math.max(1, vals.totalPads);
+      const takeoff = Math.max(1, Math.floor(total / 2));
+      port_config[portId] = {
+        takeoff_landing_pads: takeoff,
+        charging_pads: total - takeoff,
+        vtol_count: Math.max(1, vals.vtolCount),
+      };
+    }
+    fetch("http://127.0.0.1:8000/fleet/params", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ port_config }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        setPortConfig(data.port_config ?? null);
+        const currentIso = requestedGridTime ?? gridTime;
+        return fetch(`http://127.0.0.1:8000/fleet?current_time=${encodeURIComponent(currentIso)}`);
+      })
+      .then((res) => res.json())
+      .then((data) => setFleet(Array.isArray(data) ? data : []))
+      .catch(() => {});
   };
 
   // ── Data fetching ───────────────────────────
@@ -1295,10 +1333,9 @@ function App() {
                 <Polygon
                   key={`hazard-poly-${idx}`}
                   positions={poly}
+                  interactive={false}
                   pathOptions={{ color: "red", fillColor: "red", fillOpacity: 0.12, weight: 2 }}
-                >
-                  <Popup><b>Hazard Region</b><br />Merged unsafe-weather influence region.</Popup>
-                </Polygon>
+                />
               ))}
 
             {/* ── Airspace ── */}
@@ -1506,6 +1543,10 @@ function App() {
         setDemandScale={setDemandScale}
         turnaroundMinutes={turnaroundMinutes}
         setTurnaroundMinutes={setTurnaroundMinutes}
+        minPassengers={minPassengers}
+        setMinPassengers={setMinPassengers}
+        portConfig={portConfig}
+        onApplyPortConfig={handleApplyPortConfig}
       />
     </div>
   );

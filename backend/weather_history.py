@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Dict, Optional, Tuple, List
 from datetime import datetime, timedelta, date as date_type
+import json
+import os
+import time
 import requests
 
 
@@ -30,9 +33,74 @@ CAUTION_VISIBILITY_M = 8000.0
 CAUTION_PRECIP_MM = 2.5
 
 # -----------------------------
-# Cache (VERY IMPORTANT)
+# Persistent disk cache
 # -----------------------------
-WEATHER_CACHE: Dict[Tuple[str, str], dict] = {}
+_CACHE_FILE = os.path.join(os.path.dirname(__file__), "data", "weather_cache.json")
+_DIRTY = False  # written entries not yet flushed
+
+# In-memory dict keyed by "node_name|time_iso"
+_DISK_CACHE: Dict[str, dict] = {}
+
+
+def _load_cache() -> None:
+    global _DISK_CACHE
+    try:
+        with open(_CACHE_FILE, "r") as f:
+            _DISK_CACHE = json.load(f)
+        print(f"[WEATHER CACHE] Loaded {len(_DISK_CACHE)} entries from disk")
+    except FileNotFoundError:
+        _DISK_CACHE = {}
+    except Exception as exc:
+        print(f"[WEATHER CACHE] Failed to load disk cache: {exc}")
+        _DISK_CACHE = {}
+
+
+def _flush_cache() -> None:
+    global _DIRTY
+    if not _DIRTY:
+        return
+    try:
+        os.makedirs(os.path.dirname(_CACHE_FILE), exist_ok=True)
+        with open(_CACHE_FILE, "w") as f:
+            json.dump(_DISK_CACHE, f)
+        _DIRTY = False
+    except Exception as exc:
+        print(f"[WEATHER CACHE] Failed to flush disk cache: {exc}")
+
+
+def _cache_get(node_name: str, time_iso: str) -> Optional[dict]:
+    return _DISK_CACHE.get(f"{node_name}|{time_iso}")
+
+
+def _cache_set(node_name: str, time_iso: str, value: dict) -> None:
+    global _DIRTY
+    _DISK_CACHE[f"{node_name}|{time_iso}"] = value
+    _DIRTY = True
+
+
+# Compatibility shim — existing code sets WEATHER_CACHE[(name, iso)] = ...
+# We replace it with a dict-like wrapper so old call sites keep working.
+class _CacheProxy:
+    def __contains__(self, key: Tuple[str, str]) -> bool:
+        return _cache_get(key[0], key[1]) is not None
+
+    def __getitem__(self, key: Tuple[str, str]) -> dict:
+        v = _cache_get(key[0], key[1])
+        if v is None:
+            raise KeyError(key)
+        return v
+
+    def __setitem__(self, key: Tuple[str, str], value: dict) -> None:
+        _cache_set(key[0], key[1], value)
+        _flush_cache()
+
+    def get(self, key: Tuple[str, str], default=None):
+        return _cache_get(key[0], key[1]) or default
+
+
+WEATHER_CACHE: _CacheProxy = _CacheProxy()
+
+_load_cache()
 
 # -----------------------------
 # Status logic (unchanged)
@@ -67,11 +135,34 @@ def hourly_time_strings_for_range(date_str: str, start_hour: int, end_hour: int)
     ]
 
 
+def _get_with_retry(url: str, timeout: int = 15, max_retries: int = 4) -> requests.Response:
+    """GET with exponential backoff on 429 rate-limit responses."""
+    delay = 2.0
+    for attempt in range(max_retries):
+        r = requests.get(url, timeout=timeout)
+        if r.status_code == 429:
+            wait = delay * (2 ** attempt)
+            print(f"[WEATHER] Rate limited (429) — retrying in {wait:.0f}s (attempt {attempt+1}/{max_retries})")
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return r
+    r.raise_for_status()
+    return r
+
+
 def fetch_historical_weather_day_for_node(node: dict, day_str: str) -> dict:
     """
     Fetch one full day of hourly weather for a node in a single API call.
+    Returns from disk cache when all 24 hours are already present.
     Uses historical archive for past dates and forecast API for future dates.
     """
+    # If every hour of the day is already cached, reconstruct from cache
+    all_hours = [f"{day_str}T{h:02d}:00" for h in range(24)]
+    cached = {t: _cache_get(node["name"], t) for t in all_hours}
+    if all(v is not None for v in cached.values()):
+        return {t: cached[t] for t in all_hours}
+
     url = (
         f"{_weather_base_url(day_str)}"
         f"?latitude={node['lat']}"
@@ -83,8 +174,7 @@ def fetch_historical_weather_day_for_node(node: dict, day_str: str) -> dict:
         "&timezone=auto"
     )
 
-    r = requests.get(url, timeout=15)
-    r.raise_for_status()
+    r = _get_with_retry(url)
 
     data = r.json().get("hourly", {})
     times = data.get("time", [])
@@ -108,7 +198,7 @@ def fetch_historical_weather_day_for_node(node: dict, day_str: str) -> dict:
         visibility = float(visibility_raw) if visibility_raw is not None else 99999.0
         precipitation = float(precip_raw) if precip_raw is not None else 0.0
 
-        results[iso_time] = {
+        entry = {
             "forecast_time": iso_time,
             "wind_speed_mph": wind,
             "wind_gusts_mph": gust,
@@ -116,7 +206,10 @@ def fetch_historical_weather_day_for_node(node: dict, day_str: str) -> dict:
             "precipitation_mm": precipitation,
             "status": weather_status(wind, gust, visibility, precipitation),
         }
+        results[iso_time] = entry
+        _cache_set(node["name"], iso_time, entry)
 
+    _flush_cache()
     return results
 
 # -----------------------------
@@ -140,62 +233,34 @@ def interpolation_fraction(target_time_iso: str) -> float:
     dt = datetime.fromisoformat(target_time_iso)
     return dt.minute / 60.0
 
+
+def nearest_hour_index(times: List[str], target_time_iso: str) -> int:
+    target_dt = datetime.fromisoformat(target_time_iso)
+    best_idx, best_diff = 0, float("inf")
+    for i, t in enumerate(times):
+        diff = abs((datetime.fromisoformat(t) - target_dt).total_seconds())
+        if diff < best_diff:
+            best_diff, best_idx = diff, i
+    return best_idx
+
 def fetch_historical_weather_for_node(node: dict, target_time_iso: str) -> dict:
     target_dt = datetime.fromisoformat(target_time_iso)
     day_str = target_dt.date().isoformat()
 
-    cache_key = (node["name"], target_time_iso)
-    if cache_key in WEATHER_CACHE:
-        return WEATHER_CACHE[cache_key]
+    # Check persistent cache first
+    cached = _cache_get(node["name"], target_time_iso)
+    if cached is not None:
+        return cached
 
-    url = (
-        f"{_weather_base_url(day_str)}"
-        f"?latitude={node['lat']}"
-        f"&longitude={node['lon']}"
-        f"&start_date={day_str}"
-        f"&end_date={day_str}"
-        "&hourly=wind_speed_10m,wind_gusts_10m,visibility,precipitation"
-        "&wind_speed_unit=mph"
-        "&timezone=auto"
-    )
+    # Fetch the whole day at once and cache every hour — avoids per-hour API calls
+    full_day = fetch_historical_weather_day_for_node(node, day_str)
 
-    r = requests.get(url, timeout=15)
-    r.raise_for_status()
+    # Return the nearest hour to the requested time
+    if target_time_iso in full_day:
+        return full_day[target_time_iso]
 
-    data = r.json().get("hourly", {})
-
-    times = data.get("time", [])
-    winds = data.get("wind_speed_10m", [])
-    gusts = data.get("wind_gusts_10m", [])
-    vis = data.get("visibility", [])
-    precip = data.get("precipitation", [])
-
-    if not times:
-        raise ValueError("No weather data returned")
-
-    idx = nearest_hour_index(times, target_time_iso)
-
-    wind_raw = winds[idx] if idx < len(winds) else None
-    gust_raw = gusts[idx] if idx < len(gusts) else None
-    visibility_raw = vis[idx] if idx < len(vis) else None
-    precip_raw = precip[idx] if idx < len(precip) else None
-
-    wind = float(wind_raw) if wind_raw is not None else 0.0
-    gust = float(gust_raw) if gust_raw is not None else 0.0
-    visibility = float(visibility_raw) if visibility_raw is not None else 99999.0
-    precipitation = float(precip_raw) if precip_raw is not None else 0.0
-
-    result = {
-        "forecast_time": times[idx],
-        "wind_speed_mph": wind,
-        "wind_gusts_mph": gust,
-        "visibility_m": visibility,
-        "precipitation_mm": precipitation,
-        "status": weather_status(wind, gust, visibility, precipitation),
-    }
-
-    WEATHER_CACHE[cache_key] = result
-    return result
+    idx = nearest_hour_index(list(full_day.keys()), target_time_iso)
+    return list(full_day.values())[idx]
 
 # -----------------------------
 # MULTI-NODE FETCH

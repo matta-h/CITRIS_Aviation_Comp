@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 const TAB_STYLE = (active) => ({
   padding: "5px 18px",
@@ -70,8 +70,24 @@ export default function BottomToolbar({
   ticketPrice, setTicketPrice,
   demandScale, setDemandScale,
   turnaroundMinutes, setTurnaroundMinutes,
+  minPassengers, setMinPassengers,
+  portConfig, onApplyPortConfig,
 }) {
   const [activeTab, setActiveTab] = useState("controls");
+
+  // Local editable copy of port config; synced when prop loads/changes
+  const [localPorts, setLocalPorts] = useState({});
+  useEffect(() => {
+    if (!portConfig) return;
+    const init = {};
+    for (const [id, cfg] of Object.entries(portConfig)) {
+      init[id] = {
+        totalPads: (cfg.takeoff_landing_pads ?? 1) + (cfg.charging_pads ?? 2),
+        vtolCount: cfg.vtol_count ?? 2,
+      };
+    }
+    setLocalPorts(init);
+  }, [portConfig]);
 
   const h = Math.floor(currentTimeMinutes / 60);
   const m = currentTimeMinutes % 60;
@@ -102,9 +118,10 @@ export default function BottomToolbar({
         flexShrink: 0,
       }}>
         {[
-          { id: "controls", label: "Controls" },
-          { id: "overlays", label: "Overlays" },
-          { id: "config",   label: "Sim Config" },
+          { id: "controls",   label: "Controls" },
+          { id: "overlays",   label: "Overlays" },
+          { id: "config",     label: "Sim Config" },
+          { id: "vertiports", label: "Vertiport Config" },
         ].map(({ id, label }) => (
           <button key={id} style={TAB_STYLE(activeTab === id)} onClick={() => setActiveTab(id)}>
             {label}
@@ -311,6 +328,62 @@ export default function BottomToolbar({
               </div>
             </div>
 
+            {/* Minimum passengers */}
+            <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
+              <span style={{ ...LABEL_STYLE, fontSize: "11px" }}>Min Pax</span>
+              <input type="number" min="1" max="4" value={minPassengers}
+                onChange={(e) => setMinPassengers(Number(e.target.value))}
+                style={{ ...INPUT_STYLE, width: "46px" }}
+              />
+            </div>
+
+          </div>
+        )}
+
+        {/* ── VERTIPORT CONFIG TAB ── */}
+        {activeTab === "vertiports" && (
+          <div style={{ display: "flex", alignItems: "center", gap: "6px", overflowX: "auto", paddingBottom: "2px" }}>
+            {Object.entries(localPorts).map(([portId, vals]) => (
+              <div key={portId} style={{
+                display: "flex", flexDirection: "column", gap: "4px",
+                padding: "4px 8px", borderRadius: "6px",
+                border: "1px solid rgba(255,255,255,0.15)",
+                background: "rgba(255,255,255,0.05)",
+                minWidth: "72px", flexShrink: 0,
+              }}>
+                <span style={{ fontSize: "11px", fontWeight: "bold", color: "#4fc3f7", textAlign: "center" }}>
+                  {portId}
+                </span>
+                <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+                  <span style={{ fontSize: "10px", opacity: 0.6 }}>Pads</span>
+                  <input type="number" min="1" max="8" value={vals.totalPads}
+                    onChange={(e) => setLocalPorts(p => ({
+                      ...p, [portId]: { ...p[portId], totalPads: Number(e.target.value) }
+                    }))}
+                    style={{ ...INPUT_STYLE, width: "100%", fontSize: "11px", padding: "2px 4px" }}
+                  />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+                  <span style={{ fontSize: "10px", opacity: 0.6 }}>VTOLs</span>
+                  <input type="number" min="1" max="6" value={vals.vtolCount}
+                    onChange={(e) => setLocalPorts(p => ({
+                      ...p, [portId]: { ...p[portId], vtolCount: Number(e.target.value) }
+                    }))}
+                    style={{ ...INPUT_STYLE, width: "100%", fontSize: "11px", padding: "2px 4px" }}
+                  />
+                </div>
+              </div>
+            ))}
+            {Object.keys(localPorts).length > 0 && (
+              <button onClick={() => onApplyPortConfig(localPorts)} style={{
+                marginLeft: "6px", padding: "6px 14px", borderRadius: "6px",
+                background: "#1e6ca1", color: "white", border: "none",
+                cursor: "pointer", fontSize: "12px", fontWeight: "bold",
+                flexShrink: 0, alignSelf: "center",
+              }}>
+                Apply
+              </button>
+            )}
           </div>
         )}
 

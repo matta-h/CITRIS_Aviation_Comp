@@ -344,10 +344,20 @@ def update_fleet_params(params: dict) -> dict:
 
 def _sync_fleet() -> None:
     for port_id, config in PORT_CONFIG.items():
-        for i in range(1, config["vtol_count"] + 1):
+        desired = config["vtol_count"]
+        # Add missing VTOLs
+        for i in range(1, desired + 1):
             vtol_id = f"{port_id}-{i:02d}"
             if vtol_id not in FLEET:
                 FLEET[vtol_id] = _make_vtol(vtol_id, port_id)
+        # Remove excess VTOLs
+        i = desired + 1
+        while True:
+            vtol_id = f"{port_id}-{i:02d}"
+            if vtol_id not in FLEET:
+                break
+            del FLEET[vtol_id]
+            i += 1
 
 
 def reset_fleet() -> None:

@@ -225,6 +225,7 @@ def simulate_day(payload: dict):
     pilot_enabled = bool(payload.get("pilot_enabled", True))
     battery_min_pct = float(payload.get("battery_min_pct", 20.0))
     turnaround_base_minutes = int(payload.get("turnaround_base_minutes", 20))
+    min_passengers = int(payload.get("min_passengers", 1))
 
     return run_daily_simulation(
         date=date,
@@ -235,4 +236,5 @@ def simulate_day(payload: dict):
         pilot_enabled=pilot_enabled,
         battery_min_pct=battery_min_pct,
         turnaround_base_minutes=turnaround_base_minutes,
+        min_passengers=min_passengers,
     )

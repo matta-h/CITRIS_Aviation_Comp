@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 import requests
+from datetime import datetime as _datetime
 from math import ceil, floor
 from typing import Dict, List, Optional, Tuple
 
 from backend.routing_single import NODES
 from backend.demand_model import get_demand_for_timeslot
+from backend.fleet import PORT_CONFIG
 
 # ── Cost model constants (CITRIS Economic Assessment Model v4) ────────────────
 
@@ -24,22 +27,21 @@ REFERENCE_DISTANCE_MILES = 28.0
 MAINTENANCE_COST_PER_FLIGHT_USD = 30.34
 # Derived: $151,708.50 NASA residual / 5000 annual ops
 
-UC_INFRASTRUCTURE_COST_PER_FLIGHT_USD = 43.29
-# Derived: $216,467.60 annual infra OPEX / 5000 annual ops
-
-AIRPORT_INFRASTRUCTURE_COST_PER_FLIGHT_USD = 65.00
-# PLACEHOLDER — airports have larger staffing and higher landing fees.
-# Needs refinement with actual airport operating cost data.
+# ── Fixed daily costs per site (staff + facility, regardless of flight count) ──
+# Source: $216,468 annual infra OPEX ÷ 365 days, scaled by site size.
+AIRPORT_FIXED_DAILY_USD = 593.00   # 4 pads, 3 VTOLs  ($216,468/yr ÷ 365)
+UC_FIXED_DAILY_3PAD_USD = 440.00   # 3 pads, 2 VTOLs  (~$160k/yr ÷ 365)
+UC_FIXED_DAILY_2PAD_USD = 380.00   # 2 pads, 1 VTOL   (~$139k/yr ÷ 365)
 
 UC_NODES = {"UCB", "UCSC", "UCD", "UCM"}
 AIRPORT_NODES = {"KSQL", "KNUQ", "KLVK", "KCVH", "KSNS", "KOAR"}
 
-# Pad capacity per site (ground slots available simultaneously)
-# UC campuses: 3 pads (1 active + 2 charging); airports: 4 pads
-PAD_CAPACITY: Dict[str, int] = {
-    "UCB": 3, "UCSC": 3, "UCD": 3, "UCM": 3,
-    "KSQL": 4, "KNUQ": 4, "KLVK": 4, "KCVH": 4, "KSNS": 4, "KOAR": 4,
-}
+def _pad_capacity() -> Dict[str, int]:
+    """Computed fresh each call so runtime PORT_CONFIG changes are reflected."""
+    return {
+        port: cfg["takeoff_landing_pads"] + cfg["charging_pads"]
+        for port, cfg in PORT_CONFIG.items()
+    }
 
 ROUTE_BASE = "http://127.0.0.1:8000"
 
@@ -60,22 +62,38 @@ class Aircraft:
         self.total_distance_miles = 0.0
 
 
+MAX_LOITER_MINUTES = 30
+LOITER_STEP_MINUTES = 5
+
+
 def _ground_count(fleet: List["Aircraft"], port: str) -> int:
     """Aircraft currently on the ground at this port (not in flight)."""
     return sum(1 for a in fleet if a.current_port == port and not a.in_flight)
 
 
+def _predicted_ground_count(fleet: List["Aircraft"], port: str, at_minute: int) -> int:
+    """
+    Conservatively estimate how many aircraft will occupy `port` at `at_minute`.
+    Counts ground-bound aircraft that haven't been dispatched away yet (we can't
+    predict future dispatch decisions, so we assume they remain) plus inbound
+    aircraft that will have landed by then.
+    """
+    count = 0
+    for a in fleet:
+        if a.in_flight:
+            if a.dest_port == port and a.arrival_at_minute <= at_minute:
+                count += 1
+        else:
+            if a.current_port == port:
+                count += 1
+    return count
+
+
 def _build_fleet() -> List[Aircraft]:
     fleet: List[Aircraft] = []
-    for node_id in NODES:
-        if node_id in UC_NODES:
-            count = 2
-        elif node_id in AIRPORT_NODES:
-            count = 3
-        else:
-            continue
-        for i in range(1, count + 1):
-            fleet.append(Aircraft(f"{node_id}-{i}", node_id))
+    for port_id, cfg in PORT_CONFIG.items():
+        for i in range(1, cfg["vtol_count"] + 1):
+            fleet.append(Aircraft(f"{port_id}-{i:02d}", port_id))
     return fleet
 
 
@@ -87,14 +105,26 @@ def _minute_to_iso(date: str, minute: int) -> str:
     return f"{date}T{h:02d}:{m:02d}"
 
 
+def _fixed_daily_cost(port_id: str) -> float:
+    """Fixed operating cost for one site for one day, based on current pad/VTOL config."""
+    if port_id in AIRPORT_NODES:
+        return AIRPORT_FIXED_DAILY_USD
+    cfg = PORT_CONFIG.get(port_id, {})
+    total_pads = cfg.get("takeoff_landing_pads", 1) + cfg.get("charging_pads", 2)
+    vtol_count = cfg.get("vtol_count", 2)
+    if total_pads >= 3 and vtol_count >= 2:
+        return UC_FIXED_DAILY_3PAD_USD
+    return UC_FIXED_DAILY_2PAD_USD
+
+
 def _compute_costs(
-    origin: str,
     total_time_minutes: float,
     total_distance_miles: float,
     ticket_price: float,
     passengers: int,
     pilot_enabled: bool = True,
 ) -> dict:
+    """Per-flight variable costs only (energy + maintenance + optional pilot)."""
     cost_pilot = (total_time_minutes / 60.0) * PILOT_HOURLY_RATE_USD if pilot_enabled else 0.0
 
     energy_kwh = ENERGY_KWH_PER_FLIGHT_REFERENCE * (total_distance_miles / REFERENCE_DISTANCE_MILES)
@@ -103,12 +133,7 @@ def _compute_costs(
 
     cost_maintenance = MAINTENANCE_COST_PER_FLIGHT_USD
 
-    if origin in UC_NODES:
-        cost_infra = UC_INFRASTRUCTURE_COST_PER_FLIGHT_USD
-    else:
-        cost_infra = AIRPORT_INFRASTRUCTURE_COST_PER_FLIGHT_USD
-
-    cost_total = cost_pilot + cost_energy + cost_maintenance + cost_infra
+    cost_total = cost_pilot + cost_energy + cost_maintenance
     revenue = passengers * ticket_price
     profit = revenue - cost_total
 
@@ -117,7 +142,6 @@ def _compute_costs(
         "cost_pilot": round(cost_pilot, 2),
         "cost_energy": round(cost_energy, 2),
         "cost_maintenance": round(cost_maintenance, 2),
-        "cost_infrastructure": round(cost_infra, 2),
         "cost_total": round(cost_total, 2),
         "profit": round(profit, 2),
     }
@@ -134,9 +158,11 @@ def run_daily_simulation(
     pilot_enabled: bool = True,
     battery_min_pct: float = 20.0,
     turnaround_base_minutes: int = 20,
+    min_passengers: int = 1,
 ) -> dict:
     sim_start_wall = time.time()
 
+    pad_capacity = _pad_capacity()
     fleet = _build_fleet()
     node_ids = list(NODES.keys())
 
@@ -199,7 +225,7 @@ def run_daily_simulation(
             eligible = [
                 (dest, demand_acc[(origin, dest)])
                 for dest in node_ids
-                if dest != origin and demand_acc[(origin, dest)] >= 1.0
+                if dest != origin and demand_acc[(origin, dest)] >= min_passengers
             ]
             if not eligible:
                 continue
@@ -217,14 +243,6 @@ def run_daily_simulation(
                 ]
                 if not candidates:
                     break
-
-                # Check destination pad capacity before committing
-                if _ground_count(fleet, dest) >= PAD_CAPACITY.get(dest, 4):
-                    print(
-                        f"[SIM] {current_iso[11:16]} {origin}->{dest} held "
-                        f"(dest {dest} at pad capacity)"
-                    )
-                    continue
 
                 aircraft = min(candidates, key=lambda a: a.available_at_minute)
 
@@ -275,9 +293,37 @@ def run_daily_simulation(
                     demand_acc[(origin, dest)] = 0.0
                     continue
 
-                passengers = max(1, min(4, int(floor(acc_demand))))
+                passengers = max(min_passengers, min(4, int(floor(acc_demand))))
                 turnaround = turnaround_base_minutes + (15 if total_dist_mi > 60 else 0)
-                arrival_minute = current_minute + ceil(total_time_min)
+                base_arrival_minute = current_minute + ceil(total_time_min)
+
+                # ── Loiter if destination is predicted to be full at arrival ──
+                cap = pad_capacity.get(dest, 4)
+                loiter_minutes = 0
+                arrival_minute = base_arrival_minute
+                while loiter_minutes < MAX_LOITER_MINUTES:
+                    if _predicted_ground_count(fleet, dest, arrival_minute) < cap:
+                        break
+                    loiter_minutes += LOITER_STEP_MINUTES
+                    arrival_minute = base_arrival_minute + loiter_minutes
+
+                if loiter_minutes >= MAX_LOITER_MINUTES and \
+                        _predicted_ground_count(fleet, dest, arrival_minute) >= cap:
+                    print(
+                        f"[SIM] {current_iso[11:16]} {origin}->{dest} cancelled "
+                        f"(dest full, max loiter {MAX_LOITER_MINUTES} min exceeded)"
+                    )
+                    cancelled_by_origin[origin] += 1
+                    demand_acc[(origin, dest)] = 0.0
+                    continue
+
+                if loiter_minutes > 0:
+                    print(
+                        f"[SIM] {current_iso[11:16]} {origin}->{dest} loitering "
+                        f"{loiter_minutes} min (dest {dest} at capacity)"
+                    )
+
+                total_time_min_with_loiter = total_time_min + loiter_minutes
 
                 # Aircraft leaves the origin pad immediately but doesn't
                 # occupy the destination pad until it physically lands.
@@ -285,16 +331,17 @@ def run_daily_simulation(
                 aircraft.dest_port = dest
                 aircraft.arrival_at_minute = arrival_minute
                 aircraft.available_at_minute = arrival_minute + turnaround
-                aircraft.total_flight_minutes += total_time_min
+                aircraft.total_flight_minutes += total_time_min_with_loiter
                 aircraft.total_flights += 1
                 aircraft.total_distance_miles += total_dist_mi
 
                 demand_acc[(origin, dest)] = max(0.0, demand_acc[(origin, dest)] - passengers)
                 dispatched_this_step.add(aircraft.id)
 
-                arrival_iso = _minute_to_iso(date, current_minute + ceil(total_time_min))
+                arrival_iso = _minute_to_iso(date, arrival_minute)
                 wx_status = _weather_status(origin, current_iso)
-                financials = _compute_costs(origin, total_time_min, total_dist_mi, ticket_price, passengers, pilot_enabled)
+                # Pilot cost billed for loiter time too (still airborne)
+                financials = _compute_costs(total_time_min_with_loiter, total_dist_mi, ticket_price, passengers, pilot_enabled)
 
                 flight_id_counter += 1
                 record = {
@@ -303,8 +350,9 @@ def run_daily_simulation(
                     "destination": dest,
                     "departure_time_iso": current_iso,
                     "arrival_time_iso": arrival_iso,
-                    "total_time_minutes": round(total_time_min, 2),
+                    "total_time_minutes": round(total_time_min_with_loiter, 2),
                     "total_distance_miles": round(total_dist_mi, 2),
+                    "loiter_minutes": loiter_minutes,
                     "passengers": passengers,
                     "route_class": route_class,
                     "was_exchange": exchange_required,
@@ -326,21 +374,25 @@ def run_daily_simulation(
                 }
                 flight_log.append(record)
 
+                loiter_str = f" (+{loiter_minutes}min loiter)" if loiter_minutes else ""
                 print(
                     f"[SIM] {current_iso[11:16]} {origin}->{dest} dispatched  "
-                    f"{passengers} pax  {total_dist_mi:.1f} mi  {total_time_min:.0f} min  "
+                    f"{passengers} pax  {total_dist_mi:.1f} mi  "
+                    f"{total_time_min_with_loiter:.0f} min{loiter_str}  "
                     f"profit ${financials['profit']:.2f}"
                 )
 
     # ── Summaries ─────────────────────────────────────────────────────────────
+    fixed_daily_costs = {port_id: _fixed_daily_cost(port_id) for port_id in PORT_CONFIG}
+
     site_summaries = _build_site_summaries(
-        flight_log, fleet, cancelled_by_origin, start_hour, end_hour
+        flight_log, fleet, cancelled_by_origin, start_hour, end_hour, fixed_daily_costs
     )
     network_summary = _build_network_summary(
-        flight_log, site_summaries, cancelled_by_origin
+        flight_log, site_summaries, cancelled_by_origin, fixed_daily_costs
     )
 
-    return {
+    result = {
         "date": date,
         "parameters": {
             "ticket_price": ticket_price,
@@ -348,12 +400,176 @@ def run_daily_simulation(
             "pilot_enabled": pilot_enabled,
             "battery_min_pct": battery_min_pct,
             "turnaround_base_minutes": turnaround_base_minutes,
+            "min_passengers": min_passengers,
         },
         "flight_log": flight_log,
         "site_summaries": site_summaries,
         "network_summary": network_summary,
         "simulation_duration_seconds": round(time.time() - sim_start_wall, 2),
     }
+
+    _write_sim_report(result)
+    return result
+
+
+# ── Report writer ─────────────────────────────────────────────────────────────
+
+_OUTPUTS_DIR = os.path.join(os.path.dirname(__file__), "..", "outputs")
+
+
+def _write_sim_report(result: dict) -> None:
+    os.makedirs(_OUTPUTS_DIR, exist_ok=True)
+
+    date        = result["date"]
+    params      = result["parameters"]
+    net         = result["network_summary"]
+    sites       = result["site_summaries"]
+    flight_log  = result["flight_log"]
+    run_secs    = result["simulation_duration_seconds"]
+
+    # Filename encodes the key parameters for easy comparison
+    pilot_tag   = "piloted" if params["pilot_enabled"] else "autonomous"
+    fname = (
+        f"{date}_price{int(params['ticket_price'])}"
+        f"_demand{params['demand_scale']}"
+        f"_{pilot_tag}"
+        f"_minpax{params['min_passengers']}"
+        f"_{_datetime.now().strftime('%H%M%S')}"
+        ".txt"
+    )
+    path = os.path.join(_OUTPUTS_DIR, fname)
+
+    lines: List[str] = []
+    w = lines.append  # shorthand
+
+    def sep(char="─", width=64):
+        w(char * width)
+
+    sep("═")
+    w(f"  CITRIS eVTOL NETWORK SIMULATION REPORT")
+    w(f"  Date: {date}   Generated: {_datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    sep("═")
+
+    # ── Parameters ──────────────────────────────────────────────────
+    w("")
+    w("SIMULATION PARAMETERS")
+    sep()
+    w(f"  Ticket price          : ${params['ticket_price']:.2f}")
+    w(f"  Demand scale          : {params['demand_scale']}")
+    w(f"  Pilot enabled         : {'Yes' if params['pilot_enabled'] else 'No (autonomous)'}")
+    w(f"  Min battery reserve   : {params['battery_min_pct']}%")
+    w(f"  Min passengers/flight : {params['min_passengers']}")
+    w(f"  Turnaround base time  : {params['turnaround_base_minutes']} min")
+
+    # ── Vertiport config (snapshot at run time) ──────────────────────
+    w("")
+    w("VERTIPORT CONFIGURATION")
+    sep()
+    w(f"  {'Site':<8} {'Total Pads':>10} {'VTOLs':>7}")
+    sep("-")
+    for port_id, cfg in sorted(PORT_CONFIG.items()):
+        total_pads = cfg["takeoff_landing_pads"] + cfg["charging_pads"]
+        w(f"  {port_id:<8} {total_pads:>10} {cfg['vtol_count']:>7}")
+
+    # ── Network summary ──────────────────────────────────────────────
+    w("")
+    w("NETWORK SUMMARY")
+    sep()
+    w(f"  Total flights         : {net['total_flights_network']}")
+    w(f"  Total passengers      : {net['total_passengers_network']}")
+    w(f"  Cancelled flights     : {net['total_cancelled_network']}")
+    w(f"  Total revenue         : ${net['total_revenue_network']:,.2f}")
+    w(f"  Variable cost (flights): ${net['total_variable_cost_network']:,.2f}")
+    w(f"  Fixed daily cost      : ${net['total_fixed_cost_network']:,.2f}")
+    w(f"  Total cost            : ${net['total_cost_network']:,.2f}")
+    w(f"  Net profit/loss       : ${net['total_profit_network']:,.2f}")
+    be = net.get("break_even_ticket_price")
+    w(f"  Break-even ticket     : ${be:.2f}" if be else "  Break-even ticket     : N/A")
+    if net.get("busiest_route"):
+        br = net["busiest_route"]
+        w(f"  Busiest route         : {br['origin']} → {br['destination']} ({br['flight_count']} flights)")
+    dp = net.get("demand_pattern_summary", {})
+    w(f"  Morning flights (6-10): {dp.get('morning_flights', 0)}")
+    w(f"  Midday flights (10-16): {dp.get('midday_flights', 0)}")
+    w(f"  Evening flights(16-22): {dp.get('evening_flights', 0)}")
+    w(f"  Profitable sites      : {', '.join(net['profitable_sites']) or 'None'}")
+    w(f"  Unprofitable sites    : {', '.join(net['unprofitable_sites']) or 'None'}")
+
+    # ── Per-site breakdown ───────────────────────────────────────────
+    w("")
+    w("PER-SITE BREAKDOWN")
+    sep()
+    hdr = f"  {'Site':<6} {'Dep':>4} {'Arr':>4} {'Pax':>5} {'Revenue':>10} {'VarCost':>9} {'FixCost':>9} {'Profit':>10} {'Util%':>6} {'Cancel':>7}"
+    w(hdr)
+    sep("-")
+    for site_id in sorted(sites):
+        s = sites[site_id]
+        util_pct = round(s["fleet_utilization"] * 100, 1)
+        w(
+            f"  {site_id:<6}"
+            f" {s['total_departures']:>4}"
+            f" {s['total_arrivals']:>4}"
+            f" {s['total_passengers_departed']:>5}"
+            f" {s['gross_revenue']:>10,.0f}"
+            f" {s['total_variable_cost']:>9,.0f}"
+            f" {s['fixed_daily_cost']:>9,.0f}"
+            f" {s['net_profit']:>10,.0f}"
+            f" {util_pct:>5.1f}%"
+            f" {s['cancelled_flights']:>7}"
+        )
+
+    # ── Overcrowding / loiter events ─────────────────────────────────
+    loitered = [f for f in flight_log if f.get("loiter_minutes", 0) > 0]
+    w("")
+    w("CONGESTION / LOITER EVENTS")
+    sep()
+    if loitered:
+        w(f"  {len(loitered)} flight(s) required loitering:")
+        dest_counts: Dict[str, int] = {}
+        total_loiter_min = 0
+        for f in loitered:
+            dest_counts[f["destination"]] = dest_counts.get(f["destination"], 0) + 1
+            total_loiter_min += f["loiter_minutes"]
+        for dest, count in sorted(dest_counts.items(), key=lambda x: -x[1]):
+            w(f"    {dest}: {count} loiter event(s)")
+        w(f"  Total loiter time     : {total_loiter_min} min")
+        w(f"  Avg loiter per event  : {total_loiter_min / len(loitered):.1f} min")
+    else:
+        w("  No loitering required — all vertiports had capacity on arrival.")
+
+    # ── Top routes ───────────────────────────────────────────────────
+    w("")
+    w("TOP ROUTES (by flight count)")
+    sep()
+    route_counts: Dict[str, dict] = {}
+    for f in flight_log:
+        key = f"{f['origin']}→{f['destination']}"
+        if key not in route_counts:
+            route_counts[key] = {"count": 0, "pax": 0, "profit": 0.0}
+        route_counts[key]["count"]  += 1
+        route_counts[key]["pax"]    += f["passengers"]
+        route_counts[key]["profit"] += f["profit"]
+    top = sorted(route_counts.items(), key=lambda x: -x[1]["count"])[:15]
+    w(f"  {'Route':<16} {'Flights':>7} {'Pax':>6} {'Profit':>10}")
+    sep("-")
+    for route, s in top:
+        w(f"  {route:<16} {s['count']:>7} {s['pax']:>6} {s['profit']:>10,.0f}")
+
+    # ── Narrative ────────────────────────────────────────────────────
+    w("")
+    w("NARRATIVE")
+    sep()
+    for sentence in net.get("narrative", "").split(". "):
+        if sentence.strip():
+            w(f"  {sentence.strip()}.")
+    w("")
+    w(f"  Simulation completed in {run_secs:.1f}s")
+    sep("═")
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+    print(f"[SIM] Report saved → {path}")
 
 
 # ── Site summaries ────────────────────────────────────────────────────────────
@@ -364,6 +580,7 @@ def _build_site_summaries(
     cancelled_by_origin: Dict[str, int],
     start_hour: int,
     end_hour: int,
+    fixed_daily_costs: Dict[str, float],
 ) -> dict:
     operating_minutes = (end_hour - start_hour) * 60
     summaries = {}
@@ -407,7 +624,9 @@ def _build_site_summaries(
             if departures else 0.0
         )
         gross_revenue = sum(f["revenue"] for f in departures)
-        total_cost = sum(f["cost_total"] for f in departures)
+        variable_cost = sum(f["cost_total"] for f in departures)
+        fixed_cost = fixed_daily_costs.get(node_id, 0.0)
+        total_cost = variable_cost + fixed_cost
 
         summaries[node_id] = {
             "total_departures": len(departures),
@@ -418,7 +637,8 @@ def _build_site_summaries(
             "total_pilot_cost": round(sum(f["cost_pilot"] for f in departures), 2),
             "total_energy_cost": round(sum(f["cost_energy"] for f in departures), 2),
             "total_maintenance_cost": round(sum(f["cost_maintenance"] for f in departures), 2),
-            "total_infrastructure_cost": round(sum(f["cost_infrastructure"] for f in departures), 2),
+            "fixed_daily_cost": round(fixed_cost, 2),
+            "total_variable_cost": round(variable_cost, 2),
             "total_cost": round(total_cost, 2),
             "net_profit": round(gross_revenue - total_cost, 2),
             "avg_load_factor": round(avg_pax / 4.0, 3),
@@ -445,11 +665,14 @@ def _build_network_summary(
     flight_log: List[dict],
     site_summaries: dict,
     cancelled_by_origin: Dict[str, int],
+    fixed_daily_costs: Dict[str, float],
 ) -> dict:
     total_flights = len(flight_log)
     total_pax = sum(f["passengers"] for f in flight_log)
     total_revenue = sum(f["revenue"] for f in flight_log)
-    total_cost = sum(f["cost_total"] for f in flight_log)
+    total_variable_cost = sum(f["cost_total"] for f in flight_log)
+    total_fixed_cost = sum(fixed_daily_costs.values())
+    total_cost = total_variable_cost + total_fixed_cost
     total_profit = total_revenue - total_cost
     total_cancelled = sum(cancelled_by_origin.values())
 
@@ -490,6 +713,8 @@ def _build_network_summary(
         "total_flights_network": total_flights,
         "total_passengers_network": total_pax,
         "total_revenue_network": round(total_revenue, 2),
+        "total_variable_cost_network": round(total_variable_cost, 2),
+        "total_fixed_cost_network": round(total_fixed_cost, 2),
         "total_cost_network": round(total_cost, 2),
         "total_profit_network": round(total_profit, 2),
         "total_cancelled_network": total_cancelled,
